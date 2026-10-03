@@ -65,11 +65,13 @@ except Exception:  # noqa: BLE001
     res["executorch"] = "unknown"
 
 fresh, cont, chunk = {}, {}, {}
+nonfinite = 0
 for side, pte in PTE.items():
     leaks, worst = 0, 0.0
     for k, (A, B) in enumerate(pairs):
         f = step(_load_for_executorch(pte), B)
         m = _load_for_executorch(pte); step(m, A); after = step(m, B)
+        nonfinite += int(not (torch.isfinite(f).all() and torch.isfinite(after).all()))
         d = maxdiff(f, after); leaks += d > 1e-3; worst = max(worst, d)
         fresh[(side, k)] = f
         m = _load_for_executorch(pte); step(m, A); cont[(side, k)] = step(m, B[1:], start=len(A))
@@ -106,7 +108,10 @@ if TextLLMRunner is not None:
 
 runner = TextLLMRunner is not None
 res["runner_checks"] = "ran" if runner else f"skipped: {RUNNER_MISSING}"
+res["nonfinite_logit_vectors"] = nonfinite
 checks = {
+    "all compared logits are finite": nonfinite == 0,
+    "TextLLMRunner checks ran (only the Windows wheel may lack them)": runner or platform.system() == "Windows",
     "unpatched export leaks (reproduces #23262)": res["leak_unpatched"]["pairs_leaking"] >= 3
     and (not runner or res["reset_unpatched"]["same_as_fresh"] < len(Bs)),
     "patched export does not leak": res["leak_patched"]["pairs_leaking"] == 0
