@@ -23,6 +23,8 @@ from executorch.extension.pybindings.portable_lib import _load_for_executorch
 try:
     from executorch.extension.llm.runner import GenerationConfig, TextLLMRunner
 except RuntimeError as e:  # the Windows wheel ships without the LLM runner bindings
+    if "LLM runner is not installed" not in str(e):
+        raise
     TextLLMRunner = None
     RUNNER_MISSING = str(e)
 
@@ -52,7 +54,15 @@ def step(m, toks, start=0):
     return out
 
 
-maxdiff = lambda x, y: float((x - y).abs().max())
+nonfinite = 0
+
+
+def maxdiff(x, y):
+    global nonfinite
+    nonfinite += int(not (torch.isfinite(x).all() and torch.isfinite(y).all()))
+    return float((x - y).abs().max())
+
+
 rng = random.Random(0)
 pairs = [([1] + [rng.randrange(100, 8000) for _ in range(la)], [1] + [rng.randrange(100, 8000) for _ in range(lb)])
          for la, lb in [(1, 4), (6, 5), (12, 8), (3, 3)]]
@@ -65,13 +75,11 @@ except Exception:  # noqa: BLE001
     res["executorch"] = "unknown"
 
 fresh, cont, chunk = {}, {}, {}
-nonfinite = 0
 for side, pte in PTE.items():
     leaks, worst = 0, 0.0
     for k, (A, B) in enumerate(pairs):
         f = step(_load_for_executorch(pte), B)
         m = _load_for_executorch(pte); step(m, A); after = step(m, B)
-        nonfinite += int(not (torch.isfinite(f).all() and torch.isfinite(after).all()))
         d = maxdiff(f, after); leaks += d > 1e-3; worst = max(worst, d)
         fresh[(side, k)] = f
         m = _load_for_executorch(pte); step(m, A); cont[(side, k)] = step(m, B[1:], start=len(A))
