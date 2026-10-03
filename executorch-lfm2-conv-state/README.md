@@ -11,7 +11,7 @@ The workflow runs on `ubuntu-24.04` (x86_64), `ubuntu-24.04-arm` (aarch64), `mac
 - `run.sh unit <runtime>`: the four regression tests from the patch must fail on unpatched code and pass with the fix;
   on nightly, `test_qwen3_5_attention.py` and `test_transformer_block.py` from the same commit must still pass.
 - `run.sh e2e <runtime> <model>`: export the model twice with the README recipe (`lfm2_xnnpack_q8da4w.yaml`), once
-  unpatched and once with the fix, then `lfm2_state_check.py` requires that the unpatched export leaks, the patched
+  unpatched and once with the fix, then `lfm2_state_check.py` requires finite logits, that the unpatched export leaks, the patched
   export does not, and that fresh sequences, multi-turn continuation and chunked prefill are bit-identical between
   the two.
 
