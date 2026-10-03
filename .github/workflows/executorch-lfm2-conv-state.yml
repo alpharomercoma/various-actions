@@ -1,0 +1,71 @@
+name: executorch-lfm2-conv-state
+
+# pytorch/executorch#23262: LFM2/LFM2.5 short-conv state survives a reset. Reproduce on unpatched code and verify the
+# fix in executorch-lfm2-conv-state/fix.patch on Linux (x86_64, aarch64), macOS (arm64) and Windows (x86_64).
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - executorch-lfm2-conv-state/**
+      - .github/workflows/executorch-lfm2-conv-state.yml
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  unit:
+    name: unit ${{ matrix.os }} ${{ matrix.runtime }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+        runtime: [nightly, stable]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: executorch-lfm2-conv-state/run.sh unit ${{ matrix.runtime }}
+
+  e2e:
+    name: e2e ${{ matrix.os }} ${{ matrix.runtime }} ${{ matrix.model }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+        model: [lfm2_350m, lfm2_5_350m]
+        runtime: [nightly]
+        include:
+          - { os: ubuntu-24.04, model: lfm2_5_350m, runtime: stable }
+          - { os: ubuntu-24.04-arm, model: lfm2_5_350m, runtime: stable }
+          - { os: macos-15, model: lfm2_5_350m, runtime: stable }
+          - { os: windows-2025, model: lfm2_5_350m, runtime: stable }
+          - { os: ubuntu-24.04, model: lfm2_5_1_2b, runtime: nightly }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: reproduce and verify
+        run: executorch-lfm2-conv-state/run.sh e2e ${{ matrix.runtime }} ${{ matrix.model }}
+      - name: summary
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/lfm2-conv-state/summary.txt"
+          { echo "### ${{ matrix.os }} ${{ matrix.runtime }} ${{ matrix.model }}"; echo '```'; cat "$f" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.os }}-${{ matrix.runtime }}-${{ matrix.model }}
+          path: |
+            ${{ runner.temp }}/lfm2-conv-state/result_*.json
+            ${{ runner.temp }}/lfm2-conv-state/summary.txt
+            ${{ runner.temp }}/lfm2-conv-state/check.log
+            ${{ runner.temp }}/lfm2-conv-state/export_*.log
+          if-no-files-found: warn

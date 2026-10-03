@@ -1,0 +1,173 @@
+diff --git a/examples/models/lfm2/short_conv.py b/examples/models/lfm2/short_conv.py
+index ae04580d6c..983886ad73 100644
+--- a/examples/models/lfm2/short_conv.py
++++ b/examples/models/lfm2/short_conv.py
+@@ -48,10 +48,14 @@ class ShortConv(nn.Module):
+ 
+         self.out_proj = nn.Linear(dim, dim, bias=bias)
+ 
+-    def forward(self, x: torch.Tensor) -> torch.Tensor:
++    def forward(
++        self, x: torch.Tensor, input_pos: Optional[torch.Tensor] = None
++    ) -> torch.Tensor:
+         batch_size, seqlen, dim = x.size()
+         assert batch_size == 1, "batch_size must be 1"
+ 
++        self._maybe_reset_state(input_pos)
++
+         B = self.B_proj(x).transpose(-1, -2)  # (batch_size, dim, seq_len)
+         C = self.C_proj(x).transpose(-1, -2)  # (batch_size, dim, seq_len)
+         x = self.x_proj(x).transpose(-1, -2)  # (batch_size, dim, seq_len)
+@@ -82,6 +86,14 @@ class ShortConv(nn.Module):
+         y = self.out_proj(y)  # (batch_size, seq_len, dim)
+         return y
+ 
++    def _maybe_reset_state(self, input_pos: Optional[torch.Tensor]) -> None:
++        # Without input_pos every call is a whole sequence.
++        if input_pos is None:
++            self.conv_state.zero_()
++            return
++        keep = 1.0 - (input_pos[0] == 0).to(self.conv_state.dtype)
++        self.conv_state.mul_(keep)
++
+     def reset_cache(self):
+         self.conv_state.zero_()
+ 
+@@ -101,9 +113,10 @@ class ShortConvBlock(nn.Module):
+         x,
+         freqs_cos=None,
+         freqs_sin=None,
+-        _unused_attn_options: Optional[ForwardOptions] = None,
++        attn_options: Optional[ForwardOptions] = None,
+     ):  # x: 1xN
+-        h = self.conv.forward(self.attention_norm(x))
++        input_pos = attn_options.get("input_pos") if attn_options else None
++        h = self.conv.forward(self.attention_norm(x), input_pos)
+         h = x + h
+         out = h + self.feed_forward(self.ffn_norm(h))
+         return out, None
+diff --git a/examples/models/llama/tests/BUCK b/examples/models/llama/tests/BUCK
+index dc3401ced8..a896bc218c 100644
+--- a/examples/models/llama/tests/BUCK
++++ b/examples/models/llama/tests/BUCK
+@@ -41,6 +41,18 @@ fbcode_target(_kind = python_unittest,
+     ],
+ )
+ 
++fbcode_target(_kind = python_unittest,
++    name = "test_lfm2_short_conv",
++    srcs = [
++        "test_lfm2_short_conv.py",
++    ],
++    deps = [
++        "//caffe2:torch",
++        "//executorch/examples/models/lfm2:lfm2",
++        "//executorch/examples/models/llama:llama_transformer",
++    ],
++)
++
+ fbcode_target(_kind = python_unittest,
+     name = "test_pre_quantization_transforms",
+     srcs = [
+diff --git a/examples/models/llama/tests/test_lfm2_short_conv.py b/examples/models/llama/tests/test_lfm2_short_conv.py
+new file mode 100644
+index 0000000000..14978ac18b
+--- /dev/null
++++ b/examples/models/llama/tests/test_lfm2_short_conv.py
+@@ -0,0 +1,96 @@
++# Copyright (c) Meta Platforms, Inc. and affiliates.
++# All rights reserved.
++#
++# This source code is licensed under the BSD-style license found in the
++# LICENSE file in the root directory of this source tree.
++
++import copy
++import unittest
++
++import torch
++from executorch.examples.models.lfm2.short_conv import ShortConv
++from executorch.examples.models.llama.llama_transformer import construct_transformer
++from executorch.examples.models.llama.model_args import ModelArgs
++
++
++def _pos(start: int, length: int) -> torch.Tensor:
++    return torch.arange(start, start + length, dtype=torch.long)
++
++
++class ShortConvStateTest(unittest.TestCase):
++    def test_short_conv_resets_state_on_new_sequence(self):
++        torch.manual_seed(0)
++        conv = ShortConv(dim=8).eval()
++        first = torch.randn(1, 5, 8)
++        second = torch.randn(1, 4, 8)
++
++        with torch.no_grad():
++            fresh = conv(second, _pos(0, 4))
++            conv(first, _pos(0, 5))
++            self.assertFalse(torch.allclose(conv.conv_state, torch.zeros(1, 8, 2)))
++            after_first = conv(second, _pos(0, 4))
++
++        torch.testing.assert_close(after_first, fresh)
++
++    def test_short_conv_keeps_state_within_sequence(self):
++        torch.manual_seed(0)
++        conv = ShortConv(dim=8).eval()
++        x = torch.randn(1, 6, 8)
++
++        with torch.no_grad():
++            full = conv(x, _pos(0, 6))
++            prefill = conv(x[:, :3], _pos(0, 3))
++            decode = [conv(x[:, i : i + 1], _pos(i, 1)) for i in range(3, 6)]
++
++        torch.testing.assert_close(torch.cat([prefill, *decode], dim=1), full)
++
++    def test_short_conv_no_input_pos_does_not_leak_state(self):
++        torch.manual_seed(0)
++        conv = ShortConv(dim=8).eval()
++        x = torch.randn(1, 4, 8)
++
++        with torch.no_grad():
++            first = conv(x)
++            second = conv(x)
++
++        torch.testing.assert_close(first, second)
++
++
++class Lfm2HybridModelStateTest(unittest.TestCase):
++    def _make_model(self) -> torch.nn.Module:
++        args = ModelArgs(
++            dim=32,
++            hidden_dim=64,
++            n_layers=3,
++            n_heads=4,
++            n_kv_heads=2,
++            vocab_size=64,
++            max_seq_len=32,
++            max_context_len=32,
++            max_batch_size=1,
++            use_kv_cache=True,
++            use_hf_rope=True,
++            use_qk_norm=True,
++            qk_norm_before_rope=True,
++            generate_full_logits=True,
++            layer_types=["conv", "full_attention", "conv"],
++        )
++        return construct_transformer(args).eval()
++
++    def test_new_sequence_matches_fresh_model(self):
++        torch.manual_seed(0)
++        model = self._make_model()
++        reused = copy.deepcopy(model)
++        first = torch.randint(0, 64, (1, 7))
++        second = torch.randint(0, 64, (1, 5))
++
++        with torch.no_grad():
++            fresh = model(second, {"input_pos": _pos(0, 5)})
++            reused(first, {"input_pos": _pos(0, 7)})
++            after_first = reused(second, {"input_pos": _pos(0, 5)})
++
++        torch.testing.assert_close(after_first, fresh)
++
++
++if __name__ == "__main__":
++    unittest.main()
