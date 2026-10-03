@@ -14,6 +14,10 @@ defaults:
   run:
     shell: bash
 
+env:
+  # export_llm prints non-ASCII progress glyphs; Windows' default cp1252 stdout cannot encode them.
+  PYTHONUTF8: "1"
+
 jobs:
   unit:
     name: unit ${{ matrix.os }} ${{ matrix.runtime }}
