@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Reproduce pytorch/executorch#23262 and verify the fix in fix.patch on this machine.
 #   run.sh unit <runtime>            new regression tests: must fail unpatched, pass patched (+ neighbouring tests)
-#   run.sh e2e  <runtime> <model>    export unpatched and patched with the README recipe, then lfm2_state_check.py
+#   run.sh e2e  <runtime> <model> [recipe]   export unpatched and patched, then lfm2_state_check.py
 # runtime: nightly (executorch 1.6.0.dev20261002 = main 0f5dc8e8) | stable (executorch 1.5.1 from PyPI)
 # model:   lfm2_350m | lfm2_5_350m | lfm2_5_1_2b
+# recipe:  readme (lfm2_xnnpack_q8da4w.yaml, default) | no_custom_sdpa (same, with model.use_sdpa_with_kv_cache=False:
+#          the Windows wheel's runtime does not register llama::custom_sdpa, so README-recipe files cannot run there)
 set -euo pipefail
-MODE=$1; RUNTIME=$2; MODEL=${3:-}
+MODE=$1; RUNTIME=$2; MODEL=${3:-}; RECIPE=${4:-readme}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ET_COMMIT=0f5dc8e8d4b97e5425f3efcae2cfe1711fec3a4e
 WORK=${RUNNER_TEMP:-/tmp}/lfm2-conv-state
@@ -78,10 +80,12 @@ case $MODEL in
   *) echo "unknown model $MODEL"; exit 2;;
 esac
 C=et/examples/models/lfm2/config
+EXTRA=()
+case $RECIPE in readme) ;; no_custom_sdpa) EXTRA=(model.use_sdpa_with_kv_cache=False);; *) echo "unknown recipe $RECIPE"; exit 2;; esac
 export_pte() {
-  echo "::group::export $1 ($MODEL, lfm2_xnnpack_q8da4w.yaml)"
+  echo "::group::export $1 ($MODEL, lfm2_xnnpack_q8da4w.yaml, recipe $RECIPE)"
   $PY -m executorch.extension.llm.export.export_llm --config $C/lfm2_xnnpack_q8da4w.yaml \
-    +base.model_class="$MODEL" +base.params="$C/$PARAMS" +export.output_name="$1_$MODEL.pte" > "export_$1.log" 2>&1 \
+    +base.model_class="$MODEL" +base.params="$C/$PARAMS" ${EXTRA[@]+"${EXTRA[@]}"} +export.output_name="$1_$MODEL.pte" > "export_$1.log" 2>&1 \
     || { tail -40 "export_$1.log"; exit 1; }
   ls -la "$1_$MODEL.pte"
   echo "::endgroup::"
@@ -92,7 +96,7 @@ unpatch
 TOK=$($PY -c "from huggingface_hub import hf_hub_download; print(hf_hub_download('$REPO', 'tokenizer.json'))")
 echo "::group::lfm2_state_check.py"
 set +e
-$PY "$HERE/lfm2_state_check.py" "unpatched_$MODEL.pte" "patched_$MODEL.pte" "$TOK" --json "result_${RUNTIME}_$MODEL.json" > check.log 2>&1
+$PY "$HERE/lfm2_state_check.py" "unpatched_$MODEL.pte" "patched_$MODEL.pte" "$TOK" --json "result_${RUNTIME}_${MODEL}_$RECIPE.json" > check.log 2>&1
 rc=$?
 set -e
 echo "::endgroup::"

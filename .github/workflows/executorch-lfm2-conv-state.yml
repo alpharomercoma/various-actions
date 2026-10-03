@@ -36,19 +36,24 @@ jobs:
       - run: executorch-lfm2-conv-state/run.sh unit ${{ matrix.runtime }}
 
   e2e:
-    name: e2e ${{ matrix.os }} ${{ matrix.runtime }} ${{ matrix.model }}
+    name: e2e ${{ matrix.os }} ${{ matrix.runtime }} ${{ matrix.model }} ${{ matrix.recipe }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
         model: [lfm2_350m, lfm2_5_350m]
         runtime: [nightly]
+        recipe: [readme]
         include:
-          - { os: ubuntu-24.04, model: lfm2_5_350m, runtime: stable }
-          - { os: ubuntu-24.04-arm, model: lfm2_5_350m, runtime: stable }
-          - { os: macos-15, model: lfm2_5_350m, runtime: stable }
-          - { os: windows-2025, model: lfm2_5_350m, runtime: stable }
-          - { os: ubuntu-24.04, model: lfm2_5_1_2b, runtime: nightly }
+          - { os: ubuntu-24.04, model: lfm2_5_350m, runtime: stable, recipe: readme }
+          - { os: ubuntu-24.04-arm, model: lfm2_5_350m, runtime: stable, recipe: readme }
+          - { os: macos-15, model: lfm2_5_350m, runtime: stable, recipe: readme }
+          - { os: ubuntu-24.04, model: lfm2_5_1_2b, runtime: nightly, recipe: readme }
+          # The Windows wheel's runtime has no llama::custom_sdpa kernel (and no TextLLMRunner bindings).
+          - { os: windows-2025, model: lfm2_350m, runtime: nightly, recipe: no_custom_sdpa }
+          - { os: windows-2025, model: lfm2_5_350m, runtime: nightly, recipe: no_custom_sdpa }
+          - { os: windows-2025, model: lfm2_5_350m, runtime: stable, recipe: no_custom_sdpa }
+          - { os: ubuntu-24.04, model: lfm2_5_350m, runtime: nightly, recipe: no_custom_sdpa }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -57,16 +62,16 @@ jobs:
         with:
           python-version: "3.12"
       - name: reproduce and verify
-        run: executorch-lfm2-conv-state/run.sh e2e ${{ matrix.runtime }} ${{ matrix.model }}
+        run: executorch-lfm2-conv-state/run.sh e2e ${{ matrix.runtime }} ${{ matrix.model }} ${{ matrix.recipe }}
       - name: summary
         if: always()
         run: |
           f="$RUNNER_TEMP/lfm2-conv-state/summary.txt"
-          { echo "### ${{ matrix.os }} ${{ matrix.runtime }} ${{ matrix.model }}"; echo '```'; cat "$f" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### ${{ matrix.os }} ${{ matrix.runtime }} ${{ matrix.model }} ${{ matrix.recipe }}"; echo '```'; cat "$f" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: result-${{ matrix.os }}-${{ matrix.runtime }}-${{ matrix.model }}
+          name: result-${{ matrix.os }}-${{ matrix.runtime }}-${{ matrix.model }}-${{ matrix.recipe }}
           path: |
             ${{ runner.temp }}/lfm2-conv-state/result_*.json
             ${{ runner.temp }}/lfm2-conv-state/summary.txt

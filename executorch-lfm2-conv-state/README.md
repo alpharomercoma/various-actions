@@ -15,6 +15,11 @@ The workflow runs on `ubuntu-24.04` (x86_64), `ubuntu-24.04-arm` (aarch64), `mac
   export does not, and that fresh sequences, multi-turn continuation and chunked prefill are bit-identical between
   the two.
 
+Windows: the `win_amd64` wheels (1.5.1 and nightly) export fine but their runtime registers neither the
+`llama::custom_sdpa` kernel nor the `TextLLMRunner` bindings. Windows jobs therefore export with the same recipe plus
+`model.use_sdpa_with_kv_cache=False` (recipe `no_custom_sdpa`; the conv layers are unchanged) and skip the runner checks.
+One Linux job runs the same recipe as a control.
+
 The fix is applied by copying the patched `short_conv.py` over the installed wheel's copy (the only file the patch
 changes outside tests). Tests run from a directory without the executorch sources so they import the installed package.
 
