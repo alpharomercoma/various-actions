@@ -18,8 +18,13 @@ import argparse, hashlib, json, platform, random, sys
 import torch
 from executorch.extension.llm.custom_ops import custom_ops  # noqa: F401
 from executorch.kernels import quantized  # noqa: F401
-from executorch.extension.llm.runner import GenerationConfig, TextLLMRunner
 from executorch.extension.pybindings.portable_lib import _load_for_executorch
+
+try:
+    from executorch.extension.llm.runner import GenerationConfig, TextLLMRunner
+except RuntimeError as e:  # the Windows wheel ships without the LLM runner bindings
+    TextLLMRunner = None
+    RUNNER_MISSING = str(e)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("unpatched"); ap.add_argument("patched"); ap.add_argument("tokenizer")
@@ -87,37 +92,44 @@ def gen(r, p, n=48):
     return "".join(out)
 
 
-multiturn = {}
-for side, pte in PTE.items():
-    same = 0
-    for i, B in enumerate(Bs):
-        f = gen(TextLLMRunner(pte, a.tokenizer), chat(B))
-        r = TextLLMRunner(pte, a.tokenizer); gen(r, chat(A)); r.reset()
-        same += gen(r, chat(B)) == f
-        r = TextLLMRunner(pte, a.tokenizer); gen(r, chat(A)); multiturn[(side, i)] = gen(r, turn(B))
-    res[f"reset_{side}"] = {"same_as_fresh": same, "of": len(Bs)}
-res["multiturn_identical"] = sum(multiturn[("unpatched", i)] == multiturn[("patched", i)] for i in range(len(Bs)))
+if TextLLMRunner is not None:
+    multiturn = {}
+    for side, pte in PTE.items():
+        same = 0
+        for i, B in enumerate(Bs):
+            f = gen(TextLLMRunner(pte, a.tokenizer), chat(B))
+            r = TextLLMRunner(pte, a.tokenizer); gen(r, chat(A)); r.reset()
+            same += gen(r, chat(B)) == f
+            r = TextLLMRunner(pte, a.tokenizer); gen(r, chat(A)); multiturn[(side, i)] = gen(r, turn(B))
+        res[f"reset_{side}"] = {"same_as_fresh": same, "of": len(Bs)}
+    res["multiturn_identical"] = sum(multiturn[("unpatched", i)] == multiturn[("patched", i)] for i in range(len(Bs)))
 
+runner = TextLLMRunner is not None
+res["runner_checks"] = "ran" if runner else f"skipped: {RUNNER_MISSING}"
 checks = {
     "unpatched export leaks (reproduces #23262)": res["leak_unpatched"]["pairs_leaking"] >= 3
-    and res["reset_unpatched"]["same_as_fresh"] < len(Bs),
+    and (not runner or res["reset_unpatched"]["same_as_fresh"] < len(Bs)),
     "patched export does not leak": res["leak_patched"]["pairs_leaking"] == 0
-    and res["reset_patched"]["same_as_fresh"] == len(Bs),
+    and (not runner or res["reset_patched"]["same_as_fresh"] == len(Bs)),
     "fresh sequence unchanged by the fix": res["fresh_max_abs_diff"] == 0.0,
     "multi-turn continuation unchanged by the fix": res["continue_max_abs_diff"] == 0.0
-    and res["multiturn_identical"] == len(Bs),
+    and (not runner or res["multiturn_identical"] == len(Bs)),
     "chunked prefill unchanged by the fix": res["chunked_max_abs_diff"] == 0.0,
 }
 res["checks"] = checks
-lu, lp, ru, rp = res["leak_unpatched"], res["leak_patched"], res["reset_unpatched"], res["reset_patched"]
+lu, lp = res["leak_unpatched"], res["leak_patched"]
 print(f"platform {res['platform']} | python {res['python']} | torch {res['torch']} | executorch {res['executorch']}")
 for side in PTE:
     print(f"sha256 {side:9s} {res['sha256'][side]}")
 print(f"leak     unpatched {lu['pairs_leaking']}/{lu['of']} (max {lu['max_abs_diff']:.4f}) | "
       f"patched {lp['pairs_leaking']}/{lp['of']} (max {lp['max_abs_diff']:.4f})")
-print(f"reset    after reset() == fresh: unpatched {ru['same_as_fresh']}/{ru['of']} | patched {rp['same_as_fresh']}/{rp['of']}")
+if runner:
+    ru, rp = res["reset_unpatched"], res["reset_patched"]
+    print(f"reset    after reset() == fresh: unpatched {ru['same_as_fresh']}/{ru['of']} | patched {rp['same_as_fresh']}/{rp['of']}")
+else:
+    print(f"reset    TextLLMRunner checks {res['runner_checks']}")
 print(f"unchanged by fix: fresh {res['fresh_max_abs_diff']} | continue {res['continue_max_abs_diff']} | "
-      f"chunked {res['chunked_max_abs_diff']} | multi-turn text identical {res['multiturn_identical']}/{len(Bs)}")
+      f"chunked {res['chunked_max_abs_diff']}" + (f" | multi-turn text identical {res['multiturn_identical']}/{len(Bs)}" if runner else ""))
 for name, ok in checks.items():
     print(f"{'PASS' if ok else 'FAIL'}  {name}")
 if a.json:
