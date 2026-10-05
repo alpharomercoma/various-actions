@@ -23,4 +23,9 @@ One Linux job runs the same recipe as a control.
 The fix is applied by copying the patched `short_conv.py` over the installed wheel's copy (the only file the patch
 changes outside tests). Tests run from a directory without the executorch sources so they import the installed package.
 
+`buck_closure.sh` approximates the internal Buck test that failed on the first PR commit (`fix_v1.patch`): it builds a
+link tree from only the BUCK dependency closure of `examples/models/llama/tests:test_lfm2_short_conv` and runs it with
+torch but no executorch installed. `fix_v1.patch` must fail with `No module named 'executorch.examples.models.checkpoint'`;
+`fix.patch` (which adds that dependency to the `lfm2` library) must pass 4/4.
+
 Run locally: `PYTHON=/path/to/venv/python ./run.sh e2e nightly lfm2_5_350m`.

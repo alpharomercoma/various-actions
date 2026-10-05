@@ -1,17 +1,5 @@
-diff --git a/examples/models/lfm2/BUCK b/examples/models/lfm2/BUCK
-index e435e3b553..6643dd7f27 100644
---- a/examples/models/lfm2/BUCK
-+++ b/examples/models/lfm2/BUCK
-@@ -18,6 +18,7 @@ fbcode_target(_kind = runtime.python_library,
-     deps = [
-         "//caffe2:torch",
-         "//executorch/examples/models/llama:transformer_modules",
-+        "//executorch/examples/models:checkpoint",
-         "fbcode//pytorch/torchtune:lib",
-         "fbsource//third-party/pypi/safetensors:safetensors",
-     ],
 diff --git a/examples/models/lfm2/short_conv.py b/examples/models/lfm2/short_conv.py
-index ae04580d6c..b24eda7fb8 100644
+index ae04580d6c..983886ad73 100644
 --- a/examples/models/lfm2/short_conv.py
 +++ b/examples/models/lfm2/short_conv.py
 @@ -48,10 +48,14 @@ class ShortConv(nn.Module):
@@ -30,21 +18,7 @@ index ae04580d6c..b24eda7fb8 100644
          B = self.B_proj(x).transpose(-1, -2)  # (batch_size, dim, seq_len)
          C = self.C_proj(x).transpose(-1, -2)  # (batch_size, dim, seq_len)
          x = self.x_proj(x).transpose(-1, -2)  # (batch_size, dim, seq_len)
-@@ -59,10 +63,9 @@ class ShortConv(nn.Module):
-         Bx = B * x  # (batch_size, dim, seq_len)
- 
-         ## This is where we handle padding
--        ## By default, the conv_state is initialized to 0.
--        #  So, assuming prefill is done on an empty cache, concatenating conv_state to the beginning of the sequence acts similary to
--        ## using nn.Conv1d(padding=L_cache-1) (for prefill) without no manual padding.
--        ## However, the manual padding has the added benefit of being correct during decode, when the cache is not initialized to 0.
-+        ## conv_state is zero at the start of a sequence (_maybe_reset_state), so for prefill, concatenating it to the
-+        ## beginning of the sequence provides L_cache-1 zeros of causal left padding.
-+        ## During decode it holds the previous inputs instead, which plain padding could not provide.
-         Bx = torch.cat(
-             [self.conv_state, Bx], dim=-1
-         )  # (batch_size, dim, seq_len + L_cache - 1)
-@@ -82,6 +85,14 @@ class ShortConv(nn.Module):
+@@ -82,6 +86,14 @@ class ShortConv(nn.Module):
          y = self.out_proj(y)  # (batch_size, seq_len, dim)
          return y
  
@@ -59,7 +33,7 @@ index ae04580d6c..b24eda7fb8 100644
      def reset_cache(self):
          self.conv_state.zero_()
  
-@@ -101,9 +112,10 @@ class ShortConvBlock(nn.Module):
+@@ -101,9 +113,10 @@ class ShortConvBlock(nn.Module):
          x,
          freqs_cos=None,
          freqs_sin=None,
