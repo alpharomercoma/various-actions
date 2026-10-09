@@ -93,6 +93,10 @@ for n in (126, 127, 128, 129, 255, 256, 257):
 EOF
 echo "::endgroup::"
 
+# mtk_build.sh does not pass PYTHON_EXECUTABLE, so CMake's find_package(Python3) follows actions/setup-python's
+# Python3_ROOT_DIR to the system interpreter, which lacks the codegen dependencies (yaml). Point it at the venv.
+export VIRTUAL_ENV=$WORK/venv Python_ROOT_DIR=$WORK/venv Python3_ROOT_DIR=$WORK/venv
+
 build_mtk() {  # build_mtk <suffix>: backend and examples (backends/mediatek/scripts/mtk_build.sh, mtk_build_examples.sh)
   ./backends/mediatek/scripts/mtk_build.sh && ./examples/mediatek/mtk_build_examples.sh \
   && cp cmake-android-out/examples/mediatek/mtk_llama_executor_runner "$OUT/bin/mtk_llama_executor_runner$1"
