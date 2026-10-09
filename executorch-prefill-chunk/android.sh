@@ -66,10 +66,29 @@ echo "::group::export: stock export_llm, XNNPACK, S=128 C=512"
   --json "$OUT/host_check_xnnpack.json" 2>/dev/null | tee "$OUT/host_check_xnnpack.txt"
 echo "::endgroup::"
 
-echo "::group::android: QNN runtime and qnn_llama_runner (backends/qualcomm/scripts/build.sh)"
-PYTHON_EXECUTABLE="$PY" ./backends/qualcomm/scripts/build.sh --release --skip_x86_64 --job_number "$JOBS" \
-  > "$WORK/build_qnn.log" 2>&1 || { tail -80 "$WORK/build_qnn.log"; exit 1; }
-cp build-android/examples/qualcomm/oss_scripts/llama/qnn_llama_runner "$OUT/bin/"
+echo "::group::android: QNN runtime and qnn_llama_runner (the cmake steps of backends/qualcomm/scripts/build.sh)"
+# build.sh builds every Qualcomm example, and at this commit qaihub_llama3_8b_runner does not link
+# (undefined example::get_tiktoken_for_llama), so build the same configuration but only qnn_llama_runner.
+B=$ET/build-android
+{
+  cmake -S . -B "$B" -DCMAKE_INSTALL_PREFIX="$B" -DCMAKE_BUILD_TYPE=Release -DEXECUTORCH_BUILD_QNN=ON \
+    -DQNN_SDK_ROOT="$QNN_SDK_ROOT" -DEXECUTORCH_BUILD_DEVTOOLS=ON -DEXECUTORCH_BUILD_EXTENSION_LLM=ON \
+    -DEXECUTORCH_BUILD_EXTENSION_LLM_RUNNER=ON -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON \
+    -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON -DEXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR=ON \
+    -DEXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP=ON -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON \
+    -DEXECUTORCH_ENABLE_EVENT_TRACER=ON -DEXECUTORCH_ENABLE_LOGGING=ON \
+    -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a \
+    -DEXECUTORCH_BUILD_KERNELS_QUANTIZED=ON -DANDROID_PLATFORM=android-30 -DPYTHON_EXECUTABLE="$PY" \
+  && cmake --build "$B" -j"$JOBS" --target install \
+  && cmake -S examples/qualcomm -B "$B/examples/qualcomm" \
+    -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
+    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_PREFIX_PATH="$B;$B/third-party/gflags;" \
+    -DSUPPORT_REGEX_LOOKAHEAD=ON -DBUILD_TESTING=OFF -DEXECUTORCH_ENABLE_LOGGING=ON \
+    -DEXECUTORCH_BUILD_KERNELS_QUANTIZED=ON -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH -DPYTHON_EXECUTABLE="$PY" \
+    -DBUILD_DIRECT_MODE=OFF \
+  && cmake --build "$B/examples/qualcomm" -j"$JOBS" --target qnn_llama_runner
+} > "$WORK/build_qnn.log" 2>&1 || { tail -80 "$WORK/build_qnn.log"; exit 1; }
+cp "$(find "$B/examples/qualcomm" -name qnn_llama_runner -type f -perm -u+x | head -1)" "$OUT/bin/"
 find build-android -name 'libqnn_executorch_backend.so' -exec cp {} "$OUT/qnn/" \; -quit
 for f in libQnnHtp.so libQnnHtpPrepare.so libQnnSystem.so libQnnHtpV81Stub.so; do
   cp "$QNN_SDK_ROOT/lib/aarch64-android/$f" "$OUT/qnn/"
