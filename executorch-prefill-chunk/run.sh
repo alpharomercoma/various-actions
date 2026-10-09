@@ -112,15 +112,16 @@ export_pte() {  # export_pte <python> <version> <model> <S> <C> <quant> <out.pte
   echo "::endgroup::"
 }
 
-check() {  # check <python> <pte> <tokenizer> <json>
-  local py=$1 pte=$2 tok=$3 json=$4
-  echo "::group::prefill_check $(basename "$pte")"
+check() {  # check <python> <pte> <tokenizer> <json> [observe|fixed]
+  local py=$1 pte=$2 tok=$3 json=$4 expect=${5:-observe}
+  echo "::group::prefill_check $(basename "$pte") (expect $expect)"
   set +e
-  "$py" "$HERE/prefill_check.py" "$pte" "$tok" --json "$json" > "${json%.json}.log" 2>&1
+  "$py" "$HERE/prefill_check.py" "$pte" "$tok" --json "$json" --expect "$expect" > "${json%.json}.log" 2>&1
   local rc=$?
   set -e
   echo "::endgroup::"
-  grep -E "^(platform|file|advertised|module|chunked|runner|workaround|first runner)" "${json%.json}.log" | tee -a "$WORK/summary.txt"
+  grep -E "^(platform|file|advertised|module|chunked|runner|prefill|workaround|first runner|expect)" "${json%.json}.log" \
+    | tee -a "$WORK/summary.txt"
   echo >> "$WORK/summary.txt"
   [ $rc -eq 0 ] || { tail -40 "${json%.json}.log"; exit $rc; }
 }
@@ -165,11 +166,11 @@ case $MODE in
     RPY=$(venv_for 1.5.1)
     PTE="$WORK/${TAG}_et1.5.1.pte"
     [ -f "$PTE" ] || export_pte "$RPY" 1.5.1 "$M" "$S" "$C" "$Q" "$PTE"
-    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_fix_runner_${TAG}.json"
+    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_fix_runner_${TAG}.json" fixed
     # (b) the exporter fix: a file from the patched export_llm.
     PTE="$WORK/${TAG}_etsource.pte"
     export_pte "$PY" source "$M" "$S" "$C" "$Q" "$PTE"
-    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_fix_export_${TAG}.json"
+    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_fix_export_${TAG}.json" fixed
     rm -f "$WORK/${TAG}_et1.5.1.pte" "$PTE" ;;
   unit)
     build_source

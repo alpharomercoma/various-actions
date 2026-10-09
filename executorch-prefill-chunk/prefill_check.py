@@ -248,6 +248,21 @@ def runner_cases(path: str, tok_path: str, facts: dict) -> dict | None:
             row["exception"] = exc[:200]
         cases.append(row)
 
+    # prefill() of exactly S tokens: TextLLMRunner::prefill skips generate()'s context check, so this reaches the
+    # program even when S == C.
+    prefill_s = None
+    if hasattr(TextLLMRunner, "prefill"):
+        runner = TextLLMRunner(path, tok_path)
+        with captured_stderr() as err:
+            try:
+                runner.prefill(prompts.exactly(s), config())
+                ok = True
+            except Exception as e:  # noqa: BLE001
+                ok, exc = False, f"{type(e).__name__}: {e}"
+        prefill_s = {"n": s, "ok": ok, "stderr": error_lines(err["text"])}
+        if not ok:
+            prefill_s["exception"] = exc[:200]
+
     workaround = None
     if long_split and hasattr(TextLLMRunner, "prefill"):
         # Same 2S + 1 prompt, sent in pieces of at most `bound` tokens, then generation from the prefilled state.
@@ -283,10 +298,43 @@ def runner_cases(path: str, tok_path: str, facts: dict) -> dict | None:
         "available": True,
         "tokenizer": prompts.impl,
         "cases": cases,
+        "prefill_s": prefill_s,
         "workaround": workaround,
         "long_matches_workaround": same,
         "long_prompt_splits_exactly": long_split is not None,
     }
+
+
+def violations_if_fixed(result: dict) -> list[str]:
+    """What a correct runner must do with this file; each string is one violation."""
+    facts, r = result["facts"], result["runner"] or {}
+    s, ctx = facts["max_seq_len"], facts["max_context_len"]
+    out = []
+    if not r.get("available"):
+        return ["TextLLMRunner unavailable"]
+    for c in r["cases"]:
+        resized = any("resize" in line for line in c["stderr"])
+        if resized:
+            out.append(f"generate({c['n']}): resize error {c['stderr'][:1]}")
+        refused = any("Max seq length exceeded" in line for line in c["stderr"])
+        if c["n"] < ctx and s < ctx and not c["ok"]:
+            out.append(f"generate({c['n']}) failed: {c['stderr'][:2]}")
+        if s >= ctx and c["n"] >= ctx and not refused:
+            out.append(f"generate({c['n']}) with S == C was not refused by the context check")
+        seen = c.get("runner_prompt_tokens")
+        if c["ok"] and seen is not None and seen != c["n"]:
+            out.append(f"generate({c['n']}): runner encoded {seen} tokens")
+    p = r.get("prefill_s")
+    if p is not None and not p["ok"]:
+        out.append(f"prefill({p['n']}) failed: {p['stderr'][:2]}")
+    w = r.get("workaround")
+    if w is not None and not w["ok"]:
+        out.append(f"piecewise prefill failed: {w['stderr'][:2]}")
+    if w is not None and r.get("long_matches_workaround") is not True:
+        out.append(f"generate({w['n']}) output differs from piecewise prefill")
+    if s < ctx and w is None:
+        out.append("no piecewise comparison for the long prompt")
+    return out
 
 
 def main() -> int:
@@ -294,6 +342,12 @@ def main() -> int:
     ap.add_argument("pte")
     ap.add_argument("tokenizer")
     ap.add_argument("--json")
+    ap.add_argument(
+        "--expect",
+        choices=["observe", "fixed"],
+        default="observe",
+        help="fixed: exit 1 unless the runner handles every prompt that fits (see violations_if_fixed)",
+    )
     args = ap.parse_args()
     load_kernels()
 
@@ -373,15 +427,25 @@ def main() -> int:
                 f" | runner output == workaround output: {r.get('long_matches_workaround')}"
             )
         first = next((c for c in r["cases"] if not c["ok"]), None)
+        if r.get("prefill_s"):
+            p = r["prefill_s"]
+            lines.append(f"prefill({p['n']} tokens): {'ok' if p['ok'] else 'FAIL ' + ' | '.join(p['stderr'][:1])}")
         if first:
             lines.append(f"first runner failure ({first['n']} tokens): {' | '.join(first['stderr'][:2])}")
     else:
         lines.append(f"runner unavailable: {(r or {}).get('reason')}")
+    rc = 0
+    if args.expect == "fixed":
+        result["violations"] = violations_if_fixed(result)
+        lines.append(
+            "expect fixed: " + ("PASS" if not result["violations"] else "FAIL " + "; ".join(result["violations"]))
+        )
+        rc = 1 if result["violations"] else 0
     print("\n".join(lines))
     if args.json:
         with open(args.json, "w") as f:
             json.dump(result, f, indent=1)
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

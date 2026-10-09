@@ -31,10 +31,10 @@ index 0f552460d7..8d61bf3ce5 100644
          # Check second element (input_pos dimension)
          self.assertIsInstance(result[1], dict)
 diff --git a/extension/llm/runner/llm_runner_helper.cpp b/extension/llm/runner/llm_runner_helper.cpp
-index 105b3f0c9f..4a685798a6 100644
+index 105b3f0c9f..17aff09762 100644
 --- a/extension/llm/runner/llm_runner_helper.cpp
 +++ b/extension/llm/runner/llm_runner_helper.cpp
-@@ -154,6 +154,34 @@ get_llm_metadata(tokenizers::Tokenizer* tokenizer, Module* module) {
+@@ -154,6 +154,49 @@ get_llm_metadata(tokenizers::Tokenizer* tokenizer, Module* module) {
    return metadata;
  }
  
@@ -42,13 +42,28 @@ index 105b3f0c9f..4a685798a6 100644
 +    Module* module,
 +    const std::string& method_name,
 +    int64_t max_seq_len) {
++  // Best effort: if the bound cannot be read, keep get_max_seq_len, which is
++  // what the prefiller used before; a real problem with the method surfaces
++  // when it is loaded or run.
 +  auto method_meta = module->method_meta(method_name);
 +  if (!method_meta.ok() || method_meta->num_inputs() < 1) {
++    ET_LOG(
++        Info,
++        "Prefill chunk size: no input metadata for %s, using "
++        "get_max_seq_len %" PRId64,
++        method_name.c_str(),
++        max_seq_len);
 +    return max_seq_len;
 +  }
-+  // A dynamic dimension reports its upper bound in the tensor metadata.
++  // For a bounded dynamic dimension the serialized sizes hold its upper bound.
 +  auto input_meta = method_meta->input_tensor_meta(0);
 +  if (!input_meta.ok() || input_meta->sizes().size() < 2) {
++    ET_LOG(
++        Info,
++        "Prefill chunk size: %s input 0 is not a [batch, tokens] tensor, "
++        "using get_max_seq_len %" PRId64,
++        method_name.c_str(),
++        max_seq_len);
 +    return max_seq_len;
 +  }
 +  const int64_t token_bound = input_meta->sizes()[1];
@@ -69,7 +84,7 @@ index 105b3f0c9f..4a685798a6 100644
  std::unordered_set<uint64_t> get_eos_ids(
      tokenizers::Tokenizer* tokenizer,
      Module* module) {
-@@ -316,12 +344,21 @@ std::unique_ptr<TextLLMRunner> create_text_llm_runner(
+@@ -316,12 +359,21 @@ std::unique_ptr<TextLLMRunner> create_text_llm_runner(
        ? decode_text_decoder_runner.get()
        : text_decoder_runner.get();
  
@@ -93,22 +108,24 @@ index 105b3f0c9f..4a685798a6 100644
    // Create text_token_generator with stats
    auto text_token_generator = std::make_unique<TextTokenGenerator>(
 diff --git a/extension/llm/runner/llm_runner_helper.h b/extension/llm/runner/llm_runner_helper.h
-index 407ac29c72..cf7b9cc949 100644
+index 407ac29c72..1453e39123 100644
 --- a/extension/llm/runner/llm_runner_helper.h
 +++ b/extension/llm/runner/llm_runner_helper.h
-@@ -83,6 +83,26 @@ ET_EXPERIMENTAL std::unordered_set<uint64_t> get_eos_ids(
+@@ -83,6 +83,28 @@ ET_EXPERIMENTAL std::unordered_set<uint64_t> get_eos_ids(
      tokenizers::Tokenizer* tokenizer,
      Module* module);
  
 +/**
 + * @brief Gets the largest number of prompt tokens one prefill call can take
 + *
-+ * Returns `max_seq_len` (the model's get_max_seq_len), lowered to the upper
-+ * bound of the method's token input (input 0, dimension 1) when that bound is
-+ * smaller. Programs exported by export_llm with a KV cache and dynamic shape
-+ * from ExecuTorch 1.1 through 1.5 bound that dimension at max_seq_len - 1
-+ * while they publish get_max_seq_len = max_seq_len, so prefill chunks sized
-+ * from the metadata alone are one token larger than the program accepts.
++ * For the text runner's [1, N] token input: returns `max_seq_len` (the model's
++ * get_max_seq_len), lowered to the upper bound of the method's input 0,
++ * dimension 1, when that bound is smaller. The bound is the size serialized for
++ * a bounded dynamic dimension; if it cannot be read, `max_seq_len` is returned.
++ * Programs exported by export_llm with a KV cache and dynamic shape from
++ * ExecuTorch 1.1 through 1.5 bound that dimension at max_seq_len - 1 while they
++ * publish get_max_seq_len = max_seq_len, so prefill chunks sized from the
++ * metadata alone are one token larger than the program accepts.
 + *
 + * @param module The model module
 + * @param method_name The method that runs prefill
@@ -204,10 +221,10 @@ index d28eac40a8..aeab03694c 100644
      main()
 diff --git a/extension/llm/runner/test/test_llm_runner_helper.cpp b/extension/llm/runner/test/test_llm_runner_helper.cpp
 new file mode 100644
-index 0000000000..a4e6d8db47
+index 0000000000..388af172db
 --- /dev/null
 +++ b/extension/llm/runner/test/test_llm_runner_helper.cpp
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,62 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + * All rights reserved.
@@ -232,31 +249,40 @@ index 0000000000..a4e6d8db47
 +
 +// Fixtures from export_model_metadata.py: forward(tokens, input_pos) with
 +// get_max_seq_len = 8, the token dimension bounded at 7 or at 8.
++// Returns nullptr if the fixture is missing or does not load.
 +std::unique_ptr<Module> load_fixture(const char* environment_variable) {
 +  const char* path = std::getenv(environment_variable);
-+  EXPECT_NE(path, nullptr);
++  if (path == nullptr) {
++    return nullptr;
++  }
 +  auto module = std::make_unique<Module>(path);
-+  EXPECT_EQ(module->load(), Error::Ok);
++  if (module->load() != Error::Ok) {
++    return nullptr;
++  }
 +  return module;
 +}
 +
 +TEST(PrefillChunkSizeTest, LowersMaxSeqLenToTheTokenInputBound) {
 +  auto module = load_fixture("ET_PREFILL_CHUNK_BOUNDED_PATH");
++  ASSERT_NE(module, nullptr);
 +  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "forward", 8), 7);
 +}
 +
 +TEST(PrefillChunkSizeTest, KeepsMaxSeqLenWhenTheInputAcceptsIt) {
 +  auto module = load_fixture("ET_PREFILL_CHUNK_FULL_PATH");
++  ASSERT_NE(module, nullptr);
 +  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "forward", 8), 8);
 +}
 +
 +TEST(PrefillChunkSizeTest, NeverRaisesTheChunkAboveMaxSeqLen) {
 +  auto module = load_fixture("ET_PREFILL_CHUNK_FULL_PATH");
++  ASSERT_NE(module, nullptr);
 +  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "forward", 4), 4);
 +}
 +
 +TEST(PrefillChunkSizeTest, FallsBackToMaxSeqLenWithoutTheMethod) {
 +  auto module = load_fixture("ET_PREFILL_CHUNK_BOUNDED_PATH");
++  ASSERT_NE(module, nullptr);
 +  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "no_such_method", 8), 8);
 +}
 +

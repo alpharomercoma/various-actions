@@ -186,12 +186,16 @@ jobs:
       - name: flatc
         run: if [ "$RUNNER_OS" = macOS ]; then brew install flatbuffers; else sudo apt-get install -y -q flatbuffers-compiler; fi; flatc --version
       - name: build main + fix.patch, export and check
+        # Every case runs; the step fails at the end if any check (prefill_check.py --expect fixed) failed.
         run: |
-          executorch-prefill-chunk/run.sh fix stories110m 128 512 fp32
-          executorch-prefill-chunk/run.sh fix qwen3_0_6b 128 512 fp32
-          executorch-prefill-chunk/run.sh fix lfm2_350m 128 512 fp32
-          executorch-prefill-chunk/run.sh fix qwen3_0_6b 2048 8192 8da4w
-          executorch-prefill-chunk/run.sh fix qwen3_0_6b 512 512 fp32
+          rc=0
+          executorch-prefill-chunk/run.sh fix stories110m 128 512 fp32 || rc=1
+          executorch-prefill-chunk/run.sh fix qwen3_0_6b 128 512 fp32 || rc=1
+          executorch-prefill-chunk/run.sh fix lfm2_350m 128 512 fp32 || rc=1
+          executorch-prefill-chunk/run.sh fix qwen3_0_6b 2048 8192 8da4w || rc=1
+          executorch-prefill-chunk/run.sh fix stories110m 512 512 fp32 || rc=1
+          executorch-prefill-chunk/run.sh fix qwen3_0_6b 512 512 fp32 || rc=1
+          exit $rc
       - name: C++ test_runner with the new tests
         run: executorch-prefill-chunk/run.sh unit
       - name: summary
