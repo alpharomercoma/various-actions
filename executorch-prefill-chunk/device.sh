@@ -106,11 +106,10 @@ case $MODE in
     adb push -q "$DIR/bin/mtk_llama_executor_runner" "$DIR/bin/mtk_llama_executor_runner_fixed" "$M/" > /dev/null
     adb push -q "$DIR/prompts/." "$M/prompts/" > /dev/null
     adb push -q "$DIR/tokenizer.json" "$DIR"/embedding_*_fp32.bin "$M/" > /dev/null
-    PTE=$(cd "$DIR" && find . -name '*.pte' | head -1 | sed 's|^\./||')
     EMB=$(cd "$DIR" && ls embedding_*_fp32.bin | head -1)
-    adb shell "mkdir -p $M/$(dirname "$PTE")"
-    adb push -q "$DIR/$PTE" "$M/$PTE" > /dev/null
-    adb shell "chmod +x $M/mtk_llama_executor_runner*; sha256sum $M/$PTE $M/mtk_llama_executor_runner*"
+    PROMPT_PTE=qwen2_5_0_5b_A16W4_128t512c.pte GEN_PTE=qwen2_5_0_5b_A16W4_1t512c.pte
+    for f in $PROMPT_PTE $GEN_PTE; do for i in 1 2 3 4; do adb push -q "$DIR/$f" "$M/" > /dev/null && break; done; done
+    adb shell "chmod +x $M/mtk_llama_executor_runner*; sha256sum $M/*.pte $M/mtk_llama_executor_runner*"
     for b in mtk_llama_executor_runner mtk_llama_executor_runner_fixed; do
       for n in 126 127 128 129 255 256 257; do
         out=$(adb shell "cd $M && LD_LIBRARY_PATH=$M/lib:\$LD_LIBRARY_PATH ./$b --max_response=4 \
@@ -118,7 +117,7 @@ case $MODE in
           --max_token_length=32768 --rot_emb_base=1000000 --input_type=fp32 --output_type=fp32 --cache_type=fp32 \
           --mask_type=fp32 --rot_emb_type=fp32 --vocab_size=151936 --bos_token=151643 --eos_token=151645 \
           --tokenizer_type=hf --tokenizer_path=tokenizer.json --token_embedding_path=$EMB \
-          --model_package_paths=$PTE --prompt_file=prompts/q$n.txt 2>&1; echo EXIT=\$?" 2>&1)
+          --prompt_model_paths=$PROMPT_PTE --gen_model_paths=$GEN_PTE --prompt_file=prompts/q$n.txt 2>&1; echo EXIT=\$?" 2>&1)
         printf '%s n=%s exit=%s | prompt_tokens=%s | %s | response=%s\n' "$b" "$n" \
           "$(grep -o 'EXIT=[0-9]*' <<< "$out" | tail -1 | cut -d= -f2)" \
           "$(awk '/\[Input Prompt Tokens\]/{getline; print}' <<< "$out" | tr -cs '0-9' '\n' | grep -c .)" \
