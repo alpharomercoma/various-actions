@@ -56,3 +56,12 @@ convolution and attention). Locally: `PYTHON=python3.12 ./run.sh repro 1.5.1 qwe
 
 `android/PrefillAB.kt` does the same checks through the `executorch-android` AAR's `LlmModule` (`generate()` and the
 `prefillPrompt()` workaround), run with `app_process` from a dex built against the AAR.
+Build it with `kotlinc` against the AAR's `classes.jar`, convert with `d8` to `progs.dex` (including the AAR classes and
+the Kotlin standard library), push the dex and the AAR's `jni/arm64-v8a/*.so`, then on the device:
+
+```
+CLASSPATH=<dir>/progs.dex LD_LIBRARY_PATH=<dir>/lib app_process -Djava.library.path=<dir>/lib /system/bin PrefillABKt \
+  <model.pte> <tokenizer.model> <prompt dir> <bound> 127 128 129 257
+```
+
+The resize errors behind `LlmModule`'s `ExecuTorch Error 0x10` are in `logcat` (tag `ExecuTorch`).
