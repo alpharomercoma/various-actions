@@ -1,0 +1,164 @@
+name: executorch-prefill-chunk
+
+# export_llm bounds the token input at max_seq_len - 1 but publishes get_max_seq_len = max_seq_len, and the text
+# runner prefills in chunks of get_max_seq_len, so any prompt of max_seq_len tokens or more fails on exports whose
+# prefill chunk is smaller than their context. Reproduce across releases, models and platforms; verify the runner
+# fix in executorch-prefill-chunk/fix.patch. See executorch-prefill-chunk/README.md.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - executorch-prefill-chunk/**
+      - .github/workflows/executorch-prefill-chunk.yml
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  releases:
+    name: release ${{ matrix.version }} ${{ matrix.model }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["1.0.1", "1.1.0", "1.2.0", "1.3.1", "1.4.1", "1.5.1", nightly]
+        model: [stories110m, qwen3_0_6b, lfm2_350m]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: executorch-prefill-chunk/run.sh repro ${{ matrix.version }} ${{ matrix.model }} 128 512 fp32
+      - name: summary
+        if: always()
+        run: |
+          { echo "### release ${{ matrix.version }} ${{ matrix.model }}"; echo '```'; cat "$RUNNER_TEMP/prefill-chunk/summary.txt" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: releases-${{ matrix.version }}-${{ matrix.model }}
+          path: |
+            ${{ runner.temp }}/prefill-chunk/result_*.json
+            ${{ runner.temp }}/prefill-chunk/result_*.log
+            ${{ runner.temp }}/prefill-chunk/*.export.log
+            ${{ runner.temp }}/prefill-chunk/summary.txt
+          if-no-files-found: warn
+
+  variants:
+    name: variant ${{ matrix.os }} ${{ matrix.version }} ${{ matrix.model }} S${{ matrix.s }} C${{ matrix.c }} ${{ matrix.quant }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Other platforms, same contract.
+          - { os: ubuntu-24.04-arm, version: "1.5.1", model: qwen3_0_6b, s: 128, c: 512, quant: fp32 }
+          - { os: ubuntu-24.04-arm, version: nightly, model: qwen3_0_6b, s: 128, c: 512, quant: fp32 }
+          - { os: macos-15, version: "1.5.1", model: qwen3_0_6b, s: 128, c: 512, quant: fp32 }
+          - { os: macos-15, version: nightly, model: qwen3_0_6b, s: 128, c: 512, quant: fp32 }
+          - { os: macos-15, version: "1.5.1", model: lfm2_350m, s: 128, c: 512, quant: fp32 }
+          # Quantization does not matter: 8da4w at the small size, and at a deployment size.
+          - { os: ubuntu-24.04, version: "1.5.1", model: qwen3_0_6b, s: 128, c: 512, quant: 8da4w }
+          - { os: ubuntu-24.04, version: "1.5.1", model: qwen3_0_6b, s: 2048, c: 8192, quant: 8da4w }
+          - { os: ubuntu-24.04, version: nightly, model: stories110m, s: 2048, c: 8192, quant: 8da4w }
+          # Control: prefill chunk equal to the context. The runner refuses a full-context prompt before it reaches
+          # the program, so the off-by-one never surfaces.
+          - { os: ubuntu-24.04, version: "1.5.1", model: qwen3_0_6b, s: 512, c: 512, quant: fp32 }
+          - { os: ubuntu-24.04, version: "1.0.1", model: qwen3_0_6b, s: 512, c: 512, quant: fp32 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: executorch-prefill-chunk/run.sh repro ${{ matrix.version }} ${{ matrix.model }} ${{ matrix.s }} ${{ matrix.c }} ${{ matrix.quant }}
+      - name: summary
+        if: always()
+        run: |
+          { echo "### ${{ matrix.os }} ${{ matrix.version }} ${{ matrix.model }} S${{ matrix.s }} C${{ matrix.c }} ${{ matrix.quant }}"; echo '```'; cat "$RUNNER_TEMP/prefill-chunk/summary.txt" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: variants-${{ matrix.os }}-${{ matrix.version }}-${{ matrix.model }}-S${{ matrix.s }}-C${{ matrix.c }}-${{ matrix.quant }}
+          path: |
+            ${{ runner.temp }}/prefill-chunk/result_*.json
+            ${{ runner.temp }}/prefill-chunk/result_*.log
+            ${{ runner.temp }}/prefill-chunk/*.export.log
+            ${{ runner.temp }}/prefill-chunk/summary.txt
+          if-no-files-found: warn
+
+  cross:
+    name: cross export ${{ matrix.export }} run ${{ matrix.run }} ${{ matrix.model }}
+    strategy:
+      fail-fast: false
+      matrix:
+        export: ["1.0.1"]
+        run: ["1.5.1", nightly]
+        model: [stories110m, qwen3_0_6b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: executorch-prefill-chunk/run.sh cross ${{ matrix.export }} ${{ matrix.run }} ${{ matrix.model }} 128 512 fp32
+      - name: summary
+        if: always()
+        run: |
+          { echo "### export ${{ matrix.export }} run ${{ matrix.run }} ${{ matrix.model }}"; echo '```'; cat "$RUNNER_TEMP/prefill-chunk/summary.txt" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cross-${{ matrix.export }}-${{ matrix.run }}-${{ matrix.model }}
+          path: |
+            ${{ runner.temp }}/prefill-chunk/result_*.json
+            ${{ runner.temp }}/prefill-chunk/result_*.log
+            ${{ runner.temp }}/prefill-chunk/summary.txt
+          if-no-files-found: warn
+
+  fix:
+    name: fix ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build main + fix.patch, export and check
+        run: |
+          executorch-prefill-chunk/run.sh fix stories110m 128 512 fp32
+          executorch-prefill-chunk/run.sh fix qwen3_0_6b 128 512 fp32
+          executorch-prefill-chunk/run.sh fix lfm2_350m 128 512 fp32
+          executorch-prefill-chunk/run.sh fix qwen3_0_6b 2048 8192 8da4w
+          executorch-prefill-chunk/run.sh fix qwen3_0_6b 512 512 fp32
+      - name: C++ test_runner with the new tests
+        run: executorch-prefill-chunk/run.sh unit
+      - name: summary
+        if: always()
+        run: |
+          { echo "### fix ${{ matrix.os }}"; echo '```'; cat "$RUNNER_TEMP/prefill-chunk/summary.txt" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fix-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/prefill-chunk/result_*.json
+            ${{ runner.temp }}/prefill-chunk/result_*.log
+            ${{ runner.temp }}/prefill-chunk/*.export.log
+            ${{ runner.temp }}/prefill-chunk/summary.txt
+            ${{ runner.temp }}/prefill-chunk/ctest.log
+            ${{ runner.temp }}/prefill-chunk/build.log
+            ${{ runner.temp }}/prefill-chunk/cmake-build.log
+          if-no-files-found: warn

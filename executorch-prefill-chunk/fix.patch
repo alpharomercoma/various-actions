@@ -1,0 +1,230 @@
+diff --git a/extension/llm/runner/llm_runner_helper.cpp b/extension/llm/runner/llm_runner_helper.cpp
+index 105b3f0c9f..4a685798a6 100644
+--- a/extension/llm/runner/llm_runner_helper.cpp
++++ b/extension/llm/runner/llm_runner_helper.cpp
+@@ -154,6 +154,34 @@ get_llm_metadata(tokenizers::Tokenizer* tokenizer, Module* module) {
+   return metadata;
+ }
+ 
++int64_t get_max_prefill_chunk_size(
++    Module* module,
++    const std::string& method_name,
++    int64_t max_seq_len) {
++  auto method_meta = module->method_meta(method_name);
++  if (!method_meta.ok() || method_meta->num_inputs() < 1) {
++    return max_seq_len;
++  }
++  // A dynamic dimension reports its upper bound in the tensor metadata.
++  auto input_meta = method_meta->input_tensor_meta(0);
++  if (!input_meta.ok() || input_meta->sizes().size() < 2) {
++    return max_seq_len;
++  }
++  const int64_t token_bound = input_meta->sizes()[1];
++  if (token_bound <= 0 || token_bound >= max_seq_len) {
++    return max_seq_len;
++  }
++  ET_LOG(
++      Info,
++      "Prefill chunk size %" PRId64 ": %s accepts at most %" PRId64
++      " tokens per call, get_max_seq_len is %" PRId64,
++      token_bound,
++      method_name.c_str(),
++      token_bound,
++      max_seq_len);
++  return token_bound;
++}
++
+ std::unordered_set<uint64_t> get_eos_ids(
+     tokenizers::Tokenizer* tokenizer,
+     Module* module) {
+@@ -316,12 +344,21 @@ std::unique_ptr<TextLLMRunner> create_text_llm_runner(
+       ? decode_text_decoder_runner.get()
+       : text_decoder_runner.get();
+ 
++  // Size prefill chunks by what the prefill method accepts, not only by
++  // get_max_seq_len: a chunk larger than the token input's bound fails to
++  // resize the input. The metadata keeps its meaning for every other check.
++  int64_t prefill_chunk_size = metadata.at(kMaxSeqLen);
++  if (metadata.at(kUseKVCache) && metadata.at(kEnableDynamicShape)) {
++    prefill_chunk_size = get_max_prefill_chunk_size(
++        module.get(), prefill_method_name, prefill_chunk_size);
++  }
++
+   // Create text_prefiller
+   auto text_prefiller = std::make_unique<TextPrefiller>(
+       text_decoder_runner.get(),
+       metadata.at(kUseKVCache),
+       metadata.at(kEnableDynamicShape),
+-      metadata.at(kMaxSeqLen));
++      prefill_chunk_size);
+ 
+   // Create text_token_generator with stats
+   auto text_token_generator = std::make_unique<TextTokenGenerator>(
+diff --git a/extension/llm/runner/llm_runner_helper.h b/extension/llm/runner/llm_runner_helper.h
+index 407ac29c72..8b8e20fabb 100644
+--- a/extension/llm/runner/llm_runner_helper.h
++++ b/extension/llm/runner/llm_runner_helper.h
+@@ -83,6 +83,25 @@ ET_EXPERIMENTAL std::unordered_set<uint64_t> get_eos_ids(
+     tokenizers::Tokenizer* tokenizer,
+     Module* module);
+ 
++/**
++ * @brief Gets the largest number of prompt tokens one prefill call can take
++ *
++ * Returns `max_seq_len` (the model's get_max_seq_len), lowered to the upper
++ * bound of the method's token input (input 0, dimension 1) when that bound is
++ * smaller. export_llm bounds that dimension at max_seq_len - 1 while it
++ * publishes get_max_seq_len = max_seq_len, so prefill chunks sized from the
++ * metadata alone are one token larger than the program accepts.
++ *
++ * @param module The model module
++ * @param method_name The method that runs prefill
++ * @param max_seq_len The model's get_max_seq_len
++ * @return int64_t The prefill chunk size to use
++ */
++ET_EXPERIMENTAL int64_t get_max_prefill_chunk_size(
++    Module* module,
++    const std::string& method_name,
++    int64_t max_seq_len);
++
+ /**
+  * @brief Creates a TextLLMRunner instance with dependency injection
+  *
+diff --git a/extension/llm/runner/test/CMakeLists.txt b/extension/llm/runner/test/CMakeLists.txt
+index cd38042960..971c5979cb 100644
+--- a/extension/llm/runner/test/CMakeLists.txt
++++ b/extension/llm/runner/test/CMakeLists.txt
+@@ -19,6 +19,7 @@ include(${EXECUTORCH_ROOT}/tools/cmake/Test.cmake)
+ 
+ set(_test_srcs
+     test_generation_config.cpp
++    test_llm_runner_helper.cpp
+     test_model_metadata.cpp
+     test_text_llm_runner.cpp
+     test_text_prefiller.cpp
+@@ -48,6 +49,8 @@ set(_metadata_pte_files
+     "${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_dims.pte"
+     "${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_windows.pte"
+     "${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_empty.pte"
++    "${CMAKE_CURRENT_BINARY_DIR}/PrefillChunk_bounded.pte"
++    "${CMAKE_CURRENT_BINARY_DIR}/PrefillChunk_full.pte"
+ )
+ add_custom_command(
+   OUTPUT ${_metadata_pte_files}
+@@ -74,7 +77,7 @@ set_property(
+   TEST test_runner
+   PROPERTY
+     ENVIRONMENT
+-    "ET_MODEL_METADATA_FULL_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_full.pte;ET_MODEL_METADATA_LAST_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_last.pte;ET_MODEL_METADATA_SELECTED_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_selected.pte;ET_MODEL_METADATA_INVALID_CONTEXT_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_invalid_context.pte;ET_MODEL_METADATA_INVALID_PREFILL_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_invalid_prefill.pte;ET_MODEL_METADATA_INVALID_VOCAB_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_invalid_vocab.pte;ET_MODEL_METADATA_MISSING_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_missing.pte;ET_MODEL_METADATA_GEOMETRY_WRONG_TYPE_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_wrong_type.pte;ET_MODEL_METADATA_GEOMETRY_MISMATCHED_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_mismatched.pte;ET_MODEL_METADATA_GEOMETRY_INVALID_HEADS_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_heads.pte;ET_MODEL_METADATA_GEOMETRY_INVALID_DIMS_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_dims.pte;ET_MODEL_METADATA_GEOMETRY_INVALID_WINDOWS_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_windows.pte;ET_MODEL_METADATA_GEOMETRY_EMPTY_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_empty.pte"
++    "ET_MODEL_METADATA_FULL_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_full.pte;ET_MODEL_METADATA_LAST_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_last.pte;ET_MODEL_METADATA_SELECTED_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_selected.pte;ET_MODEL_METADATA_INVALID_CONTEXT_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_invalid_context.pte;ET_MODEL_METADATA_INVALID_PREFILL_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_invalid_prefill.pte;ET_MODEL_METADATA_INVALID_VOCAB_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_invalid_vocab.pte;ET_MODEL_METADATA_MISSING_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_missing.pte;ET_MODEL_METADATA_GEOMETRY_WRONG_TYPE_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_wrong_type.pte;ET_MODEL_METADATA_GEOMETRY_MISMATCHED_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_mismatched.pte;ET_MODEL_METADATA_GEOMETRY_INVALID_HEADS_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_heads.pte;ET_MODEL_METADATA_GEOMETRY_INVALID_DIMS_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_dims.pte;ET_MODEL_METADATA_GEOMETRY_INVALID_WINDOWS_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_invalid_windows.pte;ET_MODEL_METADATA_GEOMETRY_EMPTY_PATH=${CMAKE_CURRENT_BINARY_DIR}/ModelMetadata_geometry_empty.pte;ET_PREFILL_CHUNK_BOUNDED_PATH=${CMAKE_CURRENT_BINARY_DIR}/PrefillChunk_bounded.pte;ET_PREFILL_CHUNK_FULL_PATH=${CMAKE_CURRENT_BINARY_DIR}/PrefillChunk_full.pte"
+ )
+ 
+ # Override sanitizer to this issue:
+diff --git a/extension/llm/runner/test/export_model_metadata.py b/extension/llm/runner/test/export_model_metadata.py
+index d28eac40a8..aeab03694c 100644
+--- a/extension/llm/runner/test/export_model_metadata.py
++++ b/extension/llm/runner/test/export_model_metadata.py
+@@ -29,6 +29,35 @@ class Identity(torch.nn.Module):
+         return value
+ 
+ 
++class TokenInput(torch.nn.Module):
++    """A decoder's input signature (tokens, input_pos); returns the tokens."""
++
++    def forward(self, tokens: torch.Tensor, input_pos: torch.Tensor) -> torch.Tensor:
++        return tokens
++
++
++def write_prefill_chunk_fixtures(output_dir: Path) -> None:
++    """Token inputs bounded below and at get_max_seq_len, as export_llm and the
++    MLX exporter produce them."""
++    max_seq_len = 8
++    example = (torch.ones(1, 3, dtype=torch.long), torch.zeros(1, dtype=torch.long))
++    for name, bound in (("bounded", max_seq_len - 1), ("full", max_seq_len)):
++        exported = torch.export.export(
++            TokenInput(),
++            example,
++            dynamic_shapes=({1: torch.export.Dim("token_dim", max=bound)}, None),
++            strict=True,
++        )
++        program = to_edge(
++            exported,
++            constant_methods={
++                **write_max_seq_len(max_seq_len),
++                **write_max_context_len(32),
++            },
++        ).to_executorch()
++        (output_dir / f"PrefillChunk_{name}.pte").write_bytes(program.buffer)
++
++
+ def all_methods(logits_to_keep: str, activation_dtype: str) -> dict[str, object]:
+     """Compose the full metadata set from the individual per-constant writers."""
+     return {
+@@ -99,6 +128,8 @@ def main() -> None:
+     missing_program = to_edge(exported).to_executorch()
+     (output_dir / "ModelMetadata_missing.pte").write_bytes(missing_program.buffer)
+ 
++    write_prefill_chunk_fixtures(output_dir)
++
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/extension/llm/runner/test/test_llm_runner_helper.cpp b/extension/llm/runner/test/test_llm_runner_helper.cpp
+new file mode 100644
+index 0000000000..a4e6d8db47
+--- /dev/null
++++ b/extension/llm/runner/test/test_llm_runner_helper.cpp
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ * All rights reserved.
++ *
++ * This source code is licensed under the BSD-style license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++#include <executorch/extension/llm/runner/llm_runner_helper.h>
++#include <executorch/extension/module/module.h>
++
++#include <cstdlib>
++#include <memory>
++
++#include <gtest/gtest.h>
++
++namespace {
++
++using ::executorch::extension::Module;
++using ::executorch::extension::llm::get_max_prefill_chunk_size;
++using ::executorch::runtime::Error;
++
++// Fixtures from export_model_metadata.py: forward(tokens, input_pos) with
++// get_max_seq_len = 8, the token dimension bounded at 7 or at 8.
++std::unique_ptr<Module> load_fixture(const char* environment_variable) {
++  const char* path = std::getenv(environment_variable);
++  EXPECT_NE(path, nullptr);
++  auto module = std::make_unique<Module>(path);
++  EXPECT_EQ(module->load(), Error::Ok);
++  return module;
++}
++
++TEST(PrefillChunkSizeTest, LowersMaxSeqLenToTheTokenInputBound) {
++  auto module = load_fixture("ET_PREFILL_CHUNK_BOUNDED_PATH");
++  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "forward", 8), 7);
++}
++
++TEST(PrefillChunkSizeTest, KeepsMaxSeqLenWhenTheInputAcceptsIt) {
++  auto module = load_fixture("ET_PREFILL_CHUNK_FULL_PATH");
++  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "forward", 8), 8);
++}
++
++TEST(PrefillChunkSizeTest, NeverRaisesTheChunkAboveMaxSeqLen) {
++  auto module = load_fixture("ET_PREFILL_CHUNK_FULL_PATH");
++  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "forward", 4), 4);
++}
++
++TEST(PrefillChunkSizeTest, FallsBackToMaxSeqLenWithoutTheMethod) {
++  auto module = load_fixture("ET_PREFILL_CHUNK_BOUNDED_PATH");
++  EXPECT_EQ(get_max_prefill_chunk_size(module.get(), "no_such_method", 8), 8);
++}
++
++} // namespace
