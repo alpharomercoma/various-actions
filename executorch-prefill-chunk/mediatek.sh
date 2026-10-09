@@ -41,6 +41,9 @@ echo "::endgroup::"
 
 echo "::group::NeuroPilot Express SDK (.ci/scripts/setup-mediatek-deps.sh)"
 bash .ci/scripts/setup-mediatek-deps.sh > "$WORK/mediatek_deps.log" 2>&1 || { tail -40 "$WORK/mediatek_deps.log"; exit 1; }
+# examples/mediatek's vendored tokenizer code imports transformers 4.x names (SpecialTokensMixin), which transformers 5
+# removed.
+"$PY" -m pip install -q "transformers<5"
 export MEDIATEK_SDK_ROOT=/tmp/neuropilot
 export NEURON_BUFFER_ALLOCATOR_LIB=$MEDIATEK_SDK_ROOT/libneuron_buffer_allocator.so
 "$PY" -m pip list 2>/dev/null | grep -i -E "mtk|torch |transformers"

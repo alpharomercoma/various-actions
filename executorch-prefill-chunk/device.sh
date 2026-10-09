@@ -29,7 +29,7 @@ echo
 run() {  # run <label> <command run on the device with $P set to the prompt>
   local label=$1 cmd=$2 n out
   for n in $SIZES; do
-    out=$(adb shell "cd $D && P=\$(cat prompts/p$n.txt) && $cmd; echo EXIT=\$?" 2>&1)
+    out=$(adb shell "cd $D && P=\$(cat ${PROMPTS:-prompts}/p$n.txt) && $cmd; echo EXIT=\$?" 2>&1)
     # Errors and the chunk-size log line; the tokenizer loader's fallback messages (hf_tokenizer, tiktoken, sentencepiece) are not
     # errors.
     printf '%s n=%s exit=%s | prompt_tokens=%s generated=%s | %s | %s\n' "$label" "$n" \
@@ -65,12 +65,35 @@ case $MODE in
     # From the executorch-prefill-chunk-vulkan workflow's artifact: llama_main with the Vulkan backend, main without
     # and with fix.patch, on the stock export_llm Vulkan exports (fp32, and 8da4w with force_fp16), S=128 C=512.
     adb push -q "$DIR/bin/llama_main_vk" "$DIR/bin/llama_main_vk_fixed" "$D/bin/" > /dev/null
-    adb push -q "$DIR/stories110m_S128_C512_vulkan.pte" "$DIR/stories110m_S128_C512_vulkan_8da4w.pte" "$D/" > /dev/null
+    # SKIP_MODEL_PUSH=1 when the files are already on the device (the sha256sum below shows which ones are there).
+    [ -n "${SKIP_MODEL_PUSH:-}" ] || adb push -q "$DIR/stories110m_S128_C512_vulkan.pte" "$DIR/stories110m_S128_C512_vulkan_8da4w.pte" "$D/" > /dev/null
     adb shell "chmod +x $D/bin/*; sha256sum $D/stories110m_S128_C512_vulkan*.pte $D/bin/llama_main_vk*"
     SIZES="127 128 129 257"
     for f in stories110m_S128_C512_vulkan stories110m_S128_C512_vulkan_8da4w; do
       for b in llama_main_vk llama_main_vk_fixed; do
         run "$b $f" "./bin/$b --model_path=$f.pte --tokenizer_path=tokenizer.model --prompt=\"\$P\" --num_bos=0 --max_new_tokens=4 --temperature=0 2>&1"
+      done
+    done ;;
+  models)
+    # From phone_models.sh's output (qwen3_0_6b and lfm2_350m, XNNPACK fp32 and Vulkan 8da4w fp16, S=128, C=512) with
+    # bin/llama_main, bin/llama_main_fixed, bin/llama_main_vk and bin/llama_main_vk_fixed copied in. Prompts are each
+    # model's own (prompts_<model>/p<N>.txt), exactly N tokens with its tokenizer, no BOS.
+    adb push -q "$DIR/bin/." "$D/bin/" > /dev/null
+    adb shell "chmod +x $D/bin/*"
+    SIZES="127 128 129 257"
+    for m in ${MODELS:-qwen3_0_6b lfm2_350m}; do
+      adb shell "mkdir -p $D/prompts_$m"
+      adb push -q "$DIR/prompts_$m/." "$D/prompts_$m/" > /dev/null
+      adb push -q "$DIR/$m.tokenizer.json" "$D/" > /dev/null
+      # KINDS selects the files (default both); each is pushed on its own, with retries, for slow or flaky links.
+      for k in ${KINDS:-xnnpack vulkan_8da4w}; do
+        for i in 1 2 3 4; do adb push -q "$DIR/${m}_S128_C512_$k.pte" "$D/" > /dev/null && break; done
+      done
+      adb shell "sha256sum $D/${m}_S128_C512_*.pte"
+      for pair in "xnnpack:llama_main" "xnnpack:llama_main_fixed" "vulkan_8da4w:llama_main_vk" "vulkan_8da4w:llama_main_vk_fixed"; do
+        case " ${KINDS:-xnnpack vulkan_8da4w} " in *" ${pair%%:*} "*) ;; *) continue ;; esac
+        f=${m}_S128_C512_${pair%%:*} b=${pair#*:}
+        PROMPTS=prompts_$m run "$b $f" "./bin/$b --model_path=$f.pte --tokenizer_path=$m.tokenizer.json --prompt=\"\$P\" --num_bos=0 --max_new_tokens=4 --temperature=0 2>&1"
       done
     done ;;
   mediatek)
