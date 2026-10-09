@@ -31,6 +31,9 @@ echo "::endgroup::"
 cd "$ET"
 
 echo "::group::QNN SDK $QNN_VERSION"
+# The SDK's x86_64 host libraries (libQnnHtp.so, used by the AOT export) link against libc++.so.1; upstream's
+# install_qnn_sdk.sh fetches it from an LLVM release (setup_libcpp), the ubuntu package provides the same soname.
+sudo apt-get install -y -qq libc++1 libc++abi1 > /dev/null
 # The version install_qnn_sdk.sh pins (2.37) has no HTP v81 libraries, which SM8850 needs; use a newer SDK from the
 # same public location.
 curl -sSfL -o "$WORK/qairt.zip" \
