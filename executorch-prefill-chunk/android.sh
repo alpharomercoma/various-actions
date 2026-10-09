@@ -16,6 +16,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${RUNNER_TEMP:-/tmp}/prefill-android
 OUT=$WORK/out
 MAIN_COMMIT=${MAIN_COMMIT:-9875560827}
+QNN_VERSION=${QNN_VERSION:-2.42.0.251225}
 JOBS=$(nproc)
 mkdir -p "$WORK" "$OUT/bin" "$OUT/qnn"
 ET=$WORK/src/executorch
@@ -29,10 +30,15 @@ git -C "$ET" log -1 --format='%H %cd %s'
 echo "::endgroup::"
 cd "$ET"
 
-echo "::group::QNN SDK"
-# shellcheck disable=SC1091
-source backends/qualcomm/scripts/install_qnn_sdk.sh
-install_qnn
+echo "::group::QNN SDK $QNN_VERSION"
+# The version install_qnn_sdk.sh pins (2.37) has no HTP v81 libraries, which SM8850 needs; use a newer SDK from the
+# same public location.
+curl -sSfL -o "$WORK/qairt.zip" \
+  "https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/$QNN_VERSION/v$QNN_VERSION.zip"
+unzip -q "$WORK/qairt.zip" -d "$WORK/qairt-unzip" && rm "$WORK/qairt.zip"
+QNN_SDK_ROOT=$(find "$WORK/qairt-unzip" -maxdepth 3 -type d -name "$QNN_VERSION" | head -1)
+export QNN_SDK_ROOT
+ls -la "$QNN_SDK_ROOT"/lib/aarch64-android/libQnnHtp.so "$QNN_SDK_ROOT"/lib/aarch64-android/libQnnHtpV81Stub.so
 echo "QNN_SDK_ROOT=$QNN_SDK_ROOT"
 echo "::endgroup::"
 
