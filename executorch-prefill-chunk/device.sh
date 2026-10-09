@@ -36,7 +36,7 @@ run() {  # run <label> <command run on the device with $P set to the prompt>
       "$(grep -o 'EXIT=[0-9]*' <<< "$out" | tail -1 | cut -d= -f2)" \
       "$(grep -oE 'Prompt Tokens: [0-9]+|"prompt_tokens":[0-9]+|total [0-9]+ prompt tokens|num_prompt_tokens [0-9]+' <<< "$out" | head -1 | grep -oE '[0-9]+')" \
       "$(grep -oE '"generated_tokens":[0-9]+' <<< "$out" | head -1 | grep -oE '[0-9]+')" \
-      "$(grep -v -E 'tokenizers:|^Error message:|load tokenizer|ModelProto|tokenizer artifact' <<< "$out" | grep -m1 -E 'Attempted to resize|Error resizing|Error|exceed|failed' | sed 's/.*\] //' | cut -c1-150)" \
+      "$(grep -v -E 'tokenizers:|^Error message:|load tokenizer|ModelProto|tokenizer artifact|re2\.cc|Error parsing|fallback regex' <<< "$out" | grep -m1 -E 'Attempted to resize|Error resizing|Error|exceed|failed' | sed 's/.*\] //' | cut -c1-150)" \
       "$(grep -m1 -oE 'Prefill chunk size [0-9]+|AR-[0-9]+ \* [0-9]+ iters' <<< "$out")"
   done
 }
