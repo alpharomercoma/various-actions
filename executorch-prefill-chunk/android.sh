@@ -4,9 +4,10 @@
 #   bin/llama_main          examples/models/llama runner (TextLLMRunner, XNNPACK), Android arm64, main as is
 #   bin/llama_main_fixed    the same runner with fix.patch applied
 #   bin/qnn_llama_runner    examples/qualcomm/oss_scripts/llama runner (its own prompt processor), Android arm64
-#   qnn/                    the QNN runtime libraries the runner loads (aarch64-android, HTP v81 skel for SM8850)
+#   qnn/                    the QNN runtime libraries the runner loads (aarch64-android, HTP stub and skel per SoC)
 #   stories110m_S128_C512_xnnpack.pte   stock export_llm export (KV cache, dynamic shape, XNNPACK), fp32
-#   stories110m_qnn_SM8850/  llama.py export for SM8850: hybrid mode, prefill_ar_len 32, context 512, 16a4w
+#   stories110m_qnn_<SOC>/   llama.py export per SoC in QNN_SOCS (SM8850, SM8750): hybrid mode, prefill_ar_len 32,
+#                            context 512, 16a4w
 #   tokenizer.model, tokenizer.bin
 #
 # The XNNPACK file must fail with prompts of 128 tokens or more on llama_main and succeed on llama_main_fixed; the QNN
@@ -17,6 +18,8 @@ WORK=${RUNNER_TEMP:-/tmp}/prefill-android
 OUT=$WORK/out
 MAIN_COMMIT=${MAIN_COMMIT:-9875560827}
 QNN_VERSION=${QNN_VERSION:-2.42.0.251225}
+# SoC:Hexagon version pairs to export the QNN control for: Snapdragon 8 Elite Gen 5 (SM8850) and 8 Elite (SM8750).
+QNN_SOCS=${QNN_SOCS:-"SM8850:81 SM8750:79"}
 JOBS=$(nproc)
 mkdir -p "$WORK" "$OUT/bin" "$OUT/qnn"
 ET=$WORK/src/executorch
@@ -41,7 +44,7 @@ curl -sSfL -o "$WORK/qairt.zip" \
 unzip -q "$WORK/qairt.zip" -d "$WORK/qairt-unzip" && rm "$WORK/qairt.zip"
 QNN_SDK_ROOT=$(find "$WORK/qairt-unzip" -maxdepth 3 -type d -name "$QNN_VERSION" | head -1)
 export QNN_SDK_ROOT
-ls -la "$QNN_SDK_ROOT"/lib/aarch64-android/libQnnHtp.so "$QNN_SDK_ROOT"/lib/aarch64-android/libQnnHtpV81Stub.so
+ls -la "$QNN_SDK_ROOT"/lib/aarch64-android/libQnnHtp.so "$QNN_SDK_ROOT"/lib/aarch64-android/libQnnHtpV*Stub.so
 echo "QNN_SDK_ROOT=$QNN_SDK_ROOT"
 echo "::endgroup::"
 
@@ -99,23 +102,29 @@ B=$ET/build-android
 } > "$WORK/build_qnn.log" 2>&1 || { tail -80 "$WORK/build_qnn.log"; exit 1; }
 cp "$(find "$B/examples/qualcomm" -name qnn_llama_runner -type f -perm -u+x | head -1)" "$OUT/bin/"
 find build-android -name 'libqnn_executorch_backend.so' -exec cp {} "$OUT/qnn/" \; -quit
-for f in libQnnHtp.so libQnnHtpPrepare.so libQnnSystem.so libQnnHtpV81Stub.so; do
+for f in libQnnHtp.so libQnnHtpPrepare.so libQnnSystem.so; do
   cp "$QNN_SDK_ROOT/lib/aarch64-android/$f" "$OUT/qnn/"
 done
-cp "$QNN_SDK_ROOT/lib/hexagon-v81/unsigned/libQnnHtpV81Skel.so" "$OUT/qnn/"
+for soc in $QNN_SOCS; do  # the HTP stub and skel for each SoC's Hexagon version
+  v=${soc#*:}
+  cp "$QNN_SDK_ROOT/lib/aarch64-android/libQnnHtpV${v}Stub.so" "$QNN_SDK_ROOT/lib/hexagon-v${v}/unsigned/libQnnHtpV${v}Skel.so" "$OUT/qnn/"
+done
 ls -la "$OUT/qnn"
 echo "::endgroup::"
 
-echo "::group::export: QNN static llama for SM8850 (examples/qualcomm/oss_scripts/llama/llama.py)"
 export LD_LIBRARY_PATH="$QNN_SDK_ROOT/lib/x86_64-linux-clang:${LD_LIBRARY_PATH:-}"
-"$PY" examples/qualcomm/oss_scripts/llama/llama.py --artifact "$OUT/stories110m_qnn_SM8850" \
-  --build_folder build-android --checkpoint "$WORK/stories110M.pt" --params "$WORK/params.json" \
-  --tokenizer_model "$OUT/tokenizer.model" --tokenizer_bin "$OUT/tokenizer.bin" --prompt Once --temperature 0 \
-  --decoder_model stories110m --model_mode hybrid --prefill_ar_len 32 --max_seq_len 512 --max_context_len 512 \
-  --calib_tasks wikitext --calib_limit 1 --soc_model SM8850 --compile_only > "$WORK/export_qnn.log" 2>&1 \
-  || { tail -60 "$WORK/export_qnn.log"; exit 1; }
-find "$OUT/stories110m_qnn_SM8850" -maxdepth 1 -type f -name '*.pte' -exec ls -la {} \;
-echo "::endgroup::"
+for soc in $QNN_SOCS; do
+  SOC=${soc%%:*}
+  echo "::group::export: QNN static llama for $SOC (examples/qualcomm/oss_scripts/llama/llama.py)"
+  "$PY" examples/qualcomm/oss_scripts/llama/llama.py --artifact "$OUT/stories110m_qnn_$SOC" \
+    --build_folder build-android --checkpoint "$WORK/stories110M.pt" --params "$WORK/params.json" \
+    --tokenizer_model "$OUT/tokenizer.model" --tokenizer_bin "$OUT/tokenizer.bin" --prompt Once --temperature 0 \
+    --decoder_model stories110m --model_mode hybrid --prefill_ar_len 32 --max_seq_len 512 --max_context_len 512 \
+    --calib_tasks wikitext --calib_limit 1 --soc_model "$SOC" --compile_only > "$WORK/export_qnn_$SOC.log" 2>&1 \
+    || { tail -60 "$WORK/export_qnn_$SOC.log"; exit 1; }
+  find "$OUT/stories110m_qnn_$SOC" -maxdepth 1 -type f -name '*.pte' -exec ls -la {} \;
+  echo "::endgroup::"
+done
 
 android_cmake() {  # android_cmake <build dir>: core libraries with XNNPACK, then the llama runner
   # Chained with &&: set -e does not apply inside a function called from an || list.

@@ -1,0 +1,43 @@
+name: executorch-prefill-chunk-mediatek
+
+# MediaTek NeuroPilot control for executorch-prefill-chunk: an examples/mediatek export of Qwen2.5-0.5B-Instruct for
+# the Dimensity 9400 (DX4, 128-token prompt batch, cache 512) and mtk_llama_executor_runner from main without and with
+# fix.patch. The phone runs happen with executorch-prefill-chunk/device.sh <artifact> mediatek.
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  mediatek:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: executorch-prefill-chunk/mediatek.sh
+      - name: logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/prefill-mediatek/out/logs"
+          cp "$RUNNER_TEMP"/prefill-mediatek/*.log "$RUNNER_TEMP/prefill-mediatek/out/logs/" 2>/dev/null || true
+          { echo '### MANIFEST'; echo '```'; cat "$RUNNER_TEMP/prefill-mediatek/out/MANIFEST.txt" 2>/dev/null; echo '```';
+            for f in "$RUNNER_TEMP"/prefill-mediatek/out/*.txt; do
+              [ "$(basename "$f")" = MANIFEST.txt ] && continue
+              echo "### $(basename "$f" .txt)"; echo '```'; cat "$f"; echo '```'
+            done; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prefill-mediatek
+          path: ${{ runner.temp }}/prefill-mediatek/out
+          if-no-files-found: warn

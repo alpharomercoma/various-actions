@@ -6,7 +6,10 @@
 #                             prompts of exactly 127, 128, 129 and 257 tokens
 #   device.sh <dir> vulkan    llama_main_vk and llama_main_vk_fixed (Vulkan backend) on stock export_llm Vulkan exports
 #                             (fp32 and 8da4w, S=128, C=512): prompts of exactly 127, 128, 129 and 257 tokens
-#   device.sh <dir> qnn       qnn_llama_runner on the QNN export for SM8850 (prefill_ar_len 32, context 512):
+#   device.sh <dir> mediatek  mtk_llama_executor_runner (NeuroPilot) on the examples/mediatek Qwen2.5-0.5B export for
+#                             MT6991 (128-token prompt batch): prompts of 126 to 257 tokens
+#   device.sh <dir> qnn [SOC] qnn_llama_runner on the QNN export for SOC (SM8850 by default, or SM8750; prefill_ar_len
+#                             32, context 512):
 #                             prompts of exactly 31, 32, 33, 65, 128, 129 and 257 tokens
 #
 # Prompts are " apple" repeated (prompts/p<N>.txt), N tokens with the llama2.c tokenizer and no BOS, counted with the
@@ -19,7 +22,7 @@ DIR=$1 MODE=$2
 D=/data/local/tmp/prefill-chunk/ci
 adb shell "mkdir -p $D/bin $D/qnn $D/prompts"
 adb push -q "$HERE/prompts/." "$D/prompts/" > /dev/null
-adb push -q "$DIR/tokenizer.model" "$DIR/tokenizer.bin" "$D/" > /dev/null
+for f in tokenizer.model tokenizer.bin; do [ -f "$DIR/$f" ] && adb push -q "$DIR/$f" "$D/" > /dev/null; done
 adb shell "getprop ro.soc.model; getprop ro.product.model; getprop ro.build.version.release" | tr '\n' ' '
 echo
 
@@ -50,8 +53,9 @@ case $MODE in
   qnn)
     adb push -q "$DIR/bin/qnn_llama_runner" "$D/bin/" > /dev/null
     adb push -q "$DIR/qnn/." "$D/qnn/" > /dev/null
-    PTE=$(cd "$DIR" && find stories110m_qnn_SM8850 -maxdepth 1 -name '*.pte' | head -1)
-    adb shell "mkdir -p $D/stories110m_qnn_SM8850"
+    SOC=${3:-SM8850}  # device.sh <dir> qnn [SM8850|SM8750]
+    PTE=$(cd "$DIR" && find "stories110m_qnn_$SOC" -maxdepth 1 -name '*.pte' | head -1)
+    adb shell "mkdir -p $D/stories110m_qnn_$SOC"
     adb push -q "$DIR/$PTE" "$D/$PTE" > /dev/null
     adb shell "chmod +x $D/bin/*; sha256sum $D/$PTE $D/bin/qnn_llama_runner"
     SIZES="31 32 33 65 128 129 257"
@@ -67,6 +71,36 @@ case $MODE in
     for f in stories110m_S128_C512_vulkan stories110m_S128_C512_vulkan_8da4w; do
       for b in llama_main_vk llama_main_vk_fixed; do
         run "$b $f" "./bin/$b --model_path=$f.pte --tokenizer_path=tokenizer.model --prompt=\"\$P\" --num_bos=0 --max_new_tokens=4 --temperature=0 2>&1"
+      done
+    done ;;
+  mediatek)
+    # From the executorch-prefill-chunk-mediatek workflow's artifact: mtk_llama_executor_runner (NeuroPilot, MT6991),
+    # main without and with fix.patch, on the examples/mediatek Qwen2.5-0.5B-Instruct export (128-token prompt batch,
+    # cache 512). Prompts are prompts/q<N>.txt from the artifact; the runner adds its BOS setting itself.
+    M=$D/mtk
+    adb shell "mkdir -p $M/lib $M/prompts"
+    adb push -q "$DIR/lib/." "$M/lib/" > /dev/null
+    adb push -q "$DIR/bin/mtk_llama_executor_runner" "$DIR/bin/mtk_llama_executor_runner_fixed" "$M/" > /dev/null
+    adb push -q "$DIR/prompts/." "$M/prompts/" > /dev/null
+    adb push -q "$DIR/tokenizer.json" "$DIR"/embedding_*_fp32.bin "$M/" > /dev/null
+    PTE=$(cd "$DIR" && find . -name '*.pte' | head -1 | sed 's|^\./||')
+    EMB=$(cd "$DIR" && ls embedding_*_fp32.bin | head -1)
+    adb shell "mkdir -p $M/$(dirname "$PTE")"
+    adb push -q "$DIR/$PTE" "$M/$PTE" > /dev/null
+    adb shell "chmod +x $M/mtk_llama_executor_runner*; sha256sum $M/$PTE $M/mtk_llama_executor_runner*"
+    for b in mtk_llama_executor_runner mtk_llama_executor_runner_fixed; do
+      for n in 126 127 128 129 255 256 257; do
+        out=$(adb shell "cd $M && LD_LIBRARY_PATH=$M/lib:\$LD_LIBRARY_PATH ./$b --max_response=4 \
+          --prompt_token_batch_size=128 --cache_size=512 --hidden_size=896 --num_head=14 --num_layer=24 \
+          --max_token_length=32768 --rot_emb_base=1000000 --input_type=fp32 --output_type=fp32 --cache_type=fp32 \
+          --mask_type=fp32 --rot_emb_type=fp32 --vocab_size=151936 --bos_token=151643 --eos_token=151645 \
+          --tokenizer_type=hf --tokenizer_path=tokenizer.json --token_embedding_path=$EMB \
+          --model_package_paths=$PTE --prompt_file=prompts/q$n.txt 2>&1; echo EXIT=\$?" 2>&1)
+        printf '%s n=%s exit=%s | prompt_tokens=%s | %s | response=%s\n' "$b" "$n" \
+          "$(grep -o 'EXIT=[0-9]*' <<< "$out" | tail -1 | cut -d= -f2)" \
+          "$(awk '/\[Input Prompt Tokens\]/{getline; print}' <<< "$out" | tr -cs '0-9' '\n' | grep -c .)" \
+          "$(grep -v 'tokenizers:' <<< "$out" | grep -m1 -E 'rror|fail|Abort' | sed 's/.*\] //' | cut -c1-150)" \
+          "$(awk '/\[Real-time Response\]/{getline; print; exit}' <<< "$out" | cut -c1-40)"
       done
     done ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
