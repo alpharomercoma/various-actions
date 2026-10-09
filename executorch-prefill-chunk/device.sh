@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Run the on-device checks with the files from the executorch-prefill-chunk-android workflow (its `prefill-android`
-# artifact, unpacked into <dir>), over adb:
+# artifact) or, for vulkan, the executorch-prefill-chunk-vulkan workflow (`prefill-vulkan`), unpacked into <dir>, over adb:
 #
 #   device.sh <dir> xnnpack   llama_main and llama_main_fixed on the stock export_llm XNNPACK export (S=128, C=512):
 #                             prompts of exactly 127, 128, 129 and 257 tokens
+#   device.sh <dir> vulkan    llama_main_vk and llama_main_vk_fixed (Vulkan backend) on stock export_llm Vulkan exports
+#                             (fp32 and 8da4w, S=128, C=512): prompts of exactly 127, 128, 129 and 257 tokens
 #   device.sh <dir> qnn       qnn_llama_runner on the QNN export for SM8850 (prefill_ar_len 32, context 512):
 #                             prompts of exactly 31, 32, 33, 65, 128, 129 and 257 tokens
 #
@@ -55,5 +57,17 @@ case $MODE in
     SIZES="31 32 33 65 128 129 257"
     # qnn_llama_runner collects prompts from "--prompt <text>" pairs only (CollectPrompts); "--prompt=<text>" runs nothing.
     run qnn_llama_runner "rm -f out.txt; LD_LIBRARY_PATH=$D/qnn ADSP_LIBRARY_PATH=$D/qnn ./bin/qnn_llama_runner --model_path=$PTE --tokenizer_path=tokenizer.bin --decoder_model_version=llama2 --eval_mode=1 --seq_len=511 --temperature=0 --output_path=out.txt --prompt \"\$P\" 2>&1; rc=\$?; cat out.txt; (exit \$rc)" ;;
+  vulkan)
+    # From the executorch-prefill-chunk-vulkan workflow's artifact: llama_main with the Vulkan backend, main without
+    # and with fix.patch, on the stock export_llm Vulkan exports (fp32, and 8da4w with force_fp16), S=128 C=512.
+    adb push -q "$DIR/bin/llama_main_vk" "$DIR/bin/llama_main_vk_fixed" "$D/bin/" > /dev/null
+    adb push -q "$DIR/stories110m_S128_C512_vulkan.pte" "$DIR/stories110m_S128_C512_vulkan_8da4w.pte" "$D/" > /dev/null
+    adb shell "chmod +x $D/bin/*; sha256sum $D/stories110m_S128_C512_vulkan*.pte $D/bin/llama_main_vk*"
+    SIZES="127 128 129 257"
+    for f in stories110m_S128_C512_vulkan stories110m_S128_C512_vulkan_8da4w; do
+      for b in llama_main_vk llama_main_vk_fixed; do
+        run "$b $f" "./bin/$b --model_path=$f.pte --tokenizer_path=tokenizer.model --prompt=\"\$P\" --num_bos=0 --max_new_tokens=4 --temperature=0 2>&1"
+      done
+    done ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
 esac

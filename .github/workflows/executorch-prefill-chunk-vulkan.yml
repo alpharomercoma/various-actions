@@ -1,0 +1,43 @@
+name: executorch-prefill-chunk-vulkan
+
+# The prefill chunk check on ExecuTorch's Vulkan backend: stock export_llm Vulkan exports from main, checked on the
+# host with SwiftShader before and after fix.patch, and llama_main with the Vulkan backend for Android arm64, main
+# without and with fix.patch. The phone runs happen with executorch-prefill-chunk/device.sh <artifact> vulkan.
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  vulkan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: executorch-prefill-chunk/vulkan.sh
+      - name: logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/prefill-vulkan/out/logs"
+          cp "$RUNNER_TEMP"/prefill-vulkan/*.log "$RUNNER_TEMP/prefill-vulkan/out/logs/" 2>/dev/null || true
+          { echo '### MANIFEST'; echo '```'; cat "$RUNNER_TEMP/prefill-vulkan/out/MANIFEST.txt" 2>/dev/null; echo '```';
+            for f in "$RUNNER_TEMP"/prefill-vulkan/out/*.txt; do
+              [ "$(basename "$f")" = MANIFEST.txt ] && continue
+              echo "### $(basename "$f" .txt)"; echo '```'; cat "$f"; echo '```'
+            done; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prefill-vulkan
+          path: ${{ runner.temp }}/prefill-vulkan/out
+          if-no-files-found: warn
