@@ -20,12 +20,18 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import hashlib
 import json
 import os
 import platform
 import sys
 import tempfile
+
+
+def _flush_native() -> None:
+    with contextlib.suppress(Exception):
+        ctypes.CDLL(None).fflush(None)
 
 
 @contextlib.contextmanager
@@ -35,6 +41,7 @@ def captured_stderr():
     buf = {"text": "", "stdout": ""}
     sys.stdout.flush()
     sys.stderr.flush()
+    _flush_native()
     saved = {fd: os.dup(fd) for fd in (1, 2)}
     with tempfile.TemporaryFile(mode="w+b") as out, tempfile.TemporaryFile(mode="w+b") as err:
         os.dup2(out.fileno(), 1)
@@ -44,6 +51,9 @@ def captured_stderr():
         finally:
             sys.stdout.flush()
             sys.stderr.flush()
+            # The runner prints PyTorchObserver with printf; flush C stdio while fd 1 still points at the capture, or
+            # the line lands in the next call's capture.
+            _flush_native()
             for fd, keep in saved.items():
                 os.dup2(keep, fd)
                 os.close(keep)
@@ -305,35 +315,44 @@ def runner_cases(path: str, tok_path: str, facts: dict) -> dict | None:
     }
 
 
-def violations_if_fixed(result: dict) -> list[str]:
-    """What a correct runner must do with this file; each string is one violation."""
+def violations_if_fixed(result: dict, expected_bound: int | None = None) -> list[str]:
+    """What this file must do on a correct runner; each string is one violation."""
     facts, r = result["facts"], result["runner"] or {}
-    s, ctx = facts["max_seq_len"], facts["max_context_len"]
+    s, ctx, bound = facts["max_seq_len"], facts["max_context_len"], facts["bound"]
     out = []
+    if expected_bound is not None and bound != expected_bound:
+        out.append(f"token bound {bound}, expected {expected_bound}")
+    # forward() accepts exactly the prompts up to the file's bound.
+    for m in result.get("module", []):
+        if m["ok"] != (m["n"] <= bound):
+            out.append(f"forward({m['n']}) {'ok' if m['ok'] else 'failed'} with bound {bound}")
+    ch = result.get("chunked") or {}
+    if not (ch.get("at_bound", {}).get("ok") and ch.get("at_half", {}).get("ok") and ch.get("same_next_token")):
+        out.append("forward() chunked at the bound and at half of it did not both succeed with the same next token")
     if not r.get("available"):
-        return ["TextLLMRunner unavailable"]
+        return out + ["TextLLMRunner unavailable"]
     for c in r["cases"]:
-        resized = any("resize" in line for line in c["stderr"])
-        if resized:
+        if any("resize" in line for line in c["stderr"]):
             out.append(f"generate({c['n']}): resize error {c['stderr'][:1]}")
         refused = any("Max seq length exceeded" in line for line in c["stderr"])
-        if c["n"] < ctx and s < ctx and not c["ok"]:
+        if c["n"] < ctx and not c["ok"]:
             out.append(f"generate({c['n']}) failed: {c['stderr'][:2]}")
-        if s >= ctx and c["n"] >= ctx and not refused:
-            out.append(f"generate({c['n']}) with S == C was not refused by the context check")
-        seen = c.get("runner_prompt_tokens")
-        if c["ok"] and seen is not None and seen != c["n"]:
-            out.append(f"generate({c['n']}): runner encoded {seen} tokens")
+        if c["n"] >= ctx and not refused:
+            out.append(f"generate({c['n']}) >= context was not refused by the context check")
+        if c["ok"] and c.get("runner_prompt_tokens") != c["n"]:
+            out.append(f"generate({c['n']}): PyTorchObserver prompt_tokens {c.get('runner_prompt_tokens')}")
     p = r.get("prefill_s")
-    if p is not None and not p["ok"]:
+    if p is None:
+        out.append("no prefill() of S tokens")
+    elif not p["ok"]:
         out.append(f"prefill({p['n']}) failed: {p['stderr'][:2]}")
     w = r.get("workaround")
+    if s < ctx and w is None:
+        out.append("no piecewise comparison for the long prompt")
     if w is not None and not w["ok"]:
         out.append(f"piecewise prefill failed: {w['stderr'][:2]}")
     if w is not None and r.get("long_matches_workaround") is not True:
         out.append(f"generate({w['n']}) output differs from piecewise prefill")
-    if s < ctx and w is None:
-        out.append("no piecewise comparison for the long prompt")
     return out
 
 
@@ -348,6 +367,7 @@ def main() -> int:
         default="observe",
         help="fixed: exit 1 unless the runner handles every prompt that fits (see violations_if_fixed)",
     )
+    ap.add_argument("--expect-bound", type=int, help="with --expect fixed: the token bound the file must have")
     args = ap.parse_args()
     load_kernels()
 
@@ -436,7 +456,7 @@ def main() -> int:
         lines.append(f"runner unavailable: {(r or {}).get('reason')}")
     rc = 0
     if args.expect == "fixed":
-        result["violations"] = violations_if_fixed(result)
+        result["violations"] = violations_if_fixed(result, args.expect_bound)
         lines.append(
             "expect fixed: " + ("PASS" if not result["violations"] else "FAIL " + "; ".join(result["violations"]))
         )

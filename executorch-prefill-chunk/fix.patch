@@ -108,7 +108,7 @@ index 105b3f0c9f..17aff09762 100644
    // Create text_token_generator with stats
    auto text_token_generator = std::make_unique<TextTokenGenerator>(
 diff --git a/extension/llm/runner/llm_runner_helper.h b/extension/llm/runner/llm_runner_helper.h
-index 407ac29c72..1453e39123 100644
+index 407ac29c72..5af43903c8 100644
 --- a/extension/llm/runner/llm_runner_helper.h
 +++ b/extension/llm/runner/llm_runner_helper.h
 @@ -83,6 +83,28 @@ ET_EXPERIMENTAL std::unordered_set<uint64_t> get_eos_ids(
@@ -122,10 +122,10 @@ index 407ac29c72..1453e39123 100644
 + * get_max_seq_len), lowered to the upper bound of the method's input 0,
 + * dimension 1, when that bound is smaller. The bound is the size serialized for
 + * a bounded dynamic dimension; if it cannot be read, `max_seq_len` is returned.
-+ * Programs exported by export_llm with a KV cache and dynamic shape from
-+ * ExecuTorch 1.1 through 1.5 bound that dimension at max_seq_len - 1 while they
-+ * publish get_max_seq_len = max_seq_len, so prefill chunks sized from the
-+ * metadata alone are one token larger than the program accepts.
++ * export_llm's default KV-cache dynamic shapes in ExecuTorch 1.1 through 1.5
++ * bound that dimension at max_seq_len - 1 while the program publishes
++ * get_max_seq_len = max_seq_len, so prefill chunks sized from the metadata
++ * alone are one token larger than the program accepts.
 + *
 + * @param module The model module
 + * @param method_name The method that runs prefill
