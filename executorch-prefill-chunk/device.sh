@@ -9,7 +9,7 @@
 #
 # Prompts are " apple" repeated (prompts/p<N>.txt), N tokens with the llama2.c tokenizer and no BOS, counted with the
 # runtime's C++ SentencePiece tokenizer. Each line of output is one run: the runner's exit status, the prompt token
-# count it reports, its first error line and the prefill chunk size the fixed runner logs. ADB_SERVER_SOCKET selects a
+# count it reports (qnn_llama_runner adds a BOS token), its first error line and the prefill chunking it logs. ADB_SERVER_SOCKET selects a
 # remote adb server.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,13 +25,14 @@ run() {  # run <label> <command run on the device with $P set to the prompt>
   local label=$1 cmd=$2 n out
   for n in $SIZES; do
     out=$(adb shell "cd $D && P=\$(cat prompts/p$n.txt) && $cmd; echo EXIT=\$?" 2>&1)
-    # Errors and the chunk-size log line; the tokenizer loader's fallback messages (hf_tokenizer, tiktoken) are not
+    # Errors and the chunk-size log line; the tokenizer loader's fallback messages (hf_tokenizer, tiktoken, sentencepiece) are not
     # errors.
-    printf '%s n=%s exit=%s | prompt_tokens=%s | %s | %s\n' "$label" "$n" \
+    printf '%s n=%s exit=%s | prompt_tokens=%s generated=%s | %s | %s\n' "$label" "$n" \
       "$(grep -o 'EXIT=[0-9]*' <<< "$out" | tail -1 | cut -d= -f2)" \
-      "$(grep -oE 'Prompt Tokens: [0-9]+|"prompt_tokens":[0-9]+|total [0-9]+ prompt tokens|num_prompt_tokens [0-9]+' <<< "$out" | head -1 | grep -oE '[0-9]+$')" \
-      "$(grep -v 'tokenizers:' <<< "$out" | grep -m1 -E 'Attempted to resize|Error resizing|Error|exceed|failed' | sed 's/.*\] //' | cut -c1-150)" \
-      "$(grep -m1 -oE 'Prefill chunk size [0-9]+' <<< "$out")"
+      "$(grep -oE 'Prompt Tokens: [0-9]+|"prompt_tokens":[0-9]+|total [0-9]+ prompt tokens|num_prompt_tokens [0-9]+' <<< "$out" | head -1 | grep -oE '[0-9]+')" \
+      "$(grep -oE '"generated_tokens":[0-9]+' <<< "$out" | head -1 | grep -oE '[0-9]+')" \
+      "$(grep -v -E 'tokenizers:|^Error message:|load tokenizer|ModelProto|tokenizer artifact' <<< "$out" | grep -m1 -E 'Attempted to resize|Error resizing|Error|exceed|failed' | sed 's/.*\] //' | cut -c1-150)" \
+      "$(grep -m1 -oE 'Prefill chunk size [0-9]+|AR-[0-9]+ \* [0-9]+ iters' <<< "$out")"
   done
 }
 
@@ -52,6 +53,7 @@ case $MODE in
     adb push -q "$DIR/$PTE" "$D/$PTE" > /dev/null
     adb shell "chmod +x $D/bin/*; sha256sum $D/$PTE $D/bin/qnn_llama_runner"
     SIZES="31 32 33 65 128 129 257"
-    run qnn_llama_runner "LD_LIBRARY_PATH=$D/qnn ADSP_LIBRARY_PATH=$D/qnn ./bin/qnn_llama_runner --model_path=$PTE --tokenizer_path=tokenizer.bin --decoder_model_version=llama2 --eval_mode=1 --seq_len=511 --temperature=0 --prompt=\"\$P\" --output_path=out.txt 2>&1; cat out.txt" ;;
+    # qnn_llama_runner collects prompts from "--prompt <text>" pairs only (CollectPrompts); "--prompt=<text>" runs nothing.
+    run qnn_llama_runner "rm -f out.txt; LD_LIBRARY_PATH=$D/qnn ADSP_LIBRARY_PATH=$D/qnn ./bin/qnn_llama_runner --model_path=$PTE --tokenizer_path=tokenizer.bin --decoder_model_version=llama2 --eval_mode=1 --seq_len=511 --temperature=0 --output_path=out.txt --prompt \"\$P\" 2>&1; rc=\$?; cat out.txt; (exit \$rc)" ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
 esac
