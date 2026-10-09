@@ -9,7 +9,8 @@
 #
 # Prompts are " apple" repeated (prompts/p<N>.txt), N tokens with the llama2.c tokenizer and no BOS, counted with the
 # runtime's C++ SentencePiece tokenizer. Each line of output is one run: the runner's exit status, the prompt token
-# count it reports, its first error line and the generated text. ADB_SERVER_SOCKET selects a remote adb server.
+# count it reports, its first error line and the prefill chunk size the fixed runner logs. ADB_SERVER_SOCKET selects a
+# remote adb server.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 DIR=$1 MODE=$2
@@ -24,11 +25,13 @@ run() {  # run <label> <command run on the device with $P set to the prompt>
   local label=$1 cmd=$2 n out
   for n in $SIZES; do
     out=$(adb shell "cd $D && P=\$(cat prompts/p$n.txt) && $cmd; echo EXIT=\$?" 2>&1)
-    printf '%s n=%s exit=%s | prompt_tokens=%s | %s | out=%s\n' "$label" "$n" \
+    # Errors and the chunk-size log line; the tokenizer loader's fallback messages (hf_tokenizer, tiktoken) are not
+    # errors.
+    printf '%s n=%s exit=%s | prompt_tokens=%s | %s | %s\n' "$label" "$n" \
       "$(grep -o 'EXIT=[0-9]*' <<< "$out" | tail -1 | cut -d= -f2)" \
       "$(grep -oE 'Prompt Tokens: [0-9]+|"prompt_tokens":[0-9]+|total [0-9]+ prompt tokens|num_prompt_tokens [0-9]+' <<< "$out" | head -1 | grep -oE '[0-9]+$')" \
-      "$(grep -m1 -E 'Attempted to resize|Error|exceed|failed' <<< "$out" | sed 's/.*\] //' | cut -c1-150)" \
-      "$(grep -v -E '^\[|^I |^E |^W |EXIT=|PyTorchObserver' <<< "$out" | tr '\n' ' ' | cut -c1-60)"
+      "$(grep -v 'tokenizers:' <<< "$out" | grep -m1 -E 'Attempted to resize|Error resizing|Error|exceed|failed' | sed 's/.*\] //' | cut -c1-150)" \
+      "$(grep -m1 -oE 'Prefill chunk size [0-9]+' <<< "$out")"
   done
 }
 
