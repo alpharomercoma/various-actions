@@ -72,7 +72,7 @@ echo "::group::export: examples/mediatek qwen, 1 chunk, A16W4, DX4, prompt 128t5
 Q=examples/mediatek/model_export_scripts/qwen.py
 grep -q 'CompileSpec("ExtractSharedBlobKey"' "$Q"
 sed -i '/CompileSpec("ExtractSharedBlobKey"/d' "$Q"
-! grep -q 'ExtractSharedBlobKey' "$Q"
+if grep -q 'ExtractSharedBlobKey' "$Q"; then echo "ExtractSharedBlobKey still in $Q"; exit 1; fi
 for shape in 128t512c 1t512c; do
   rm -rf examples/mediatek/pte
   (cd examples/mediatek && python3 model_export_scripts/qwen.py "models/llm_models/weights/$MODEL/config.json" \
