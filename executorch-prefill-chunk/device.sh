@@ -90,7 +90,8 @@ case $MODE in
         for i in 1 2 3 4; do adb push -q "$DIR/${m}_S128_C512_$k.pte" "$D/" > /dev/null && break; done
       done
       adb shell "sha256sum $D/${m}_S128_C512_*.pte"
-      for pair in "xnnpack:llama_main" "xnnpack:llama_main_fixed" "vulkan_8da4w:llama_main_vk" "vulkan_8da4w:llama_main_vk_fixed"; do
+      for pair in "xnnpack:llama_main" "xnnpack:llama_main_fixed" "xnnpack_8da4w:llama_main" "xnnpack_8da4w:llama_main_fixed" \
+                  "vulkan_8da4w:llama_main_vk" "vulkan_8da4w:llama_main_vk_fixed"; do
         case " ${KINDS:-xnnpack vulkan_8da4w} " in *" ${pair%%:*} "*) ;; *) continue ;; esac
         f=${m}_S128_C512_${pair%%:*} b=${pair#*:}
         PROMPTS=prompts_$m run "$b $f" "./bin/$b --model_path=$f.pte --tokenizer_path=$m.tokenizer.json --prompt=\"\$P\" --num_bos=0 --max_new_tokens=4 --temperature=0 2>&1"
@@ -107,8 +108,8 @@ case $MODE in
     adb push -q "$DIR/prompts/." "$M/prompts/" > /dev/null
     adb push -q "$DIR/tokenizer.json" "$DIR"/embedding_*_fp32.bin "$M/" > /dev/null
     EMB=$(cd "$DIR" && ls embedding_*_fp32.bin | head -1)
-    PROMPT_PTE=qwen2_5_0_5b_A16W4_128t512c.pte GEN_PTE=qwen2_5_0_5b_A16W4_1t512c.pte
-    for f in $PROMPT_PTE $GEN_PTE; do for i in 1 2 3 4; do adb push -q "$DIR/$f" "$M/" > /dev/null && break; done; done
+    PTE=qwen2_5_0_5b_A16W4_128t512c_1t512c.pte
+    for i in 1 2 3 4; do adb push -q "$DIR/$PTE" "$M/" > /dev/null && break; done
     adb shell "chmod +x $M/mtk_llama_executor_runner*; sha256sum $M/*.pte $M/mtk_llama_executor_runner*"
     for b in mtk_llama_executor_runner mtk_llama_executor_runner_fixed; do
       for n in 126 127 128 129 255 256 257; do
@@ -117,7 +118,7 @@ case $MODE in
           --max_token_length=32768 --rot_emb_base=1000000 --input_type=fp32 --output_type=fp32 --cache_type=fp32 \
           --mask_type=fp32 --rot_emb_type=fp32 --vocab_size=151936 --bos_token=151643 --eos_token=151645 \
           --tokenizer_type=hf --tokenizer_path=tokenizer.json --token_embedding_path=$EMB \
-          --prompt_model_paths=$PROMPT_PTE --gen_model_paths=$GEN_PTE --prompt_file=prompts/q$n.txt 2>&1; echo EXIT=\$?" 2>&1)
+          --model_package_paths=$PTE --prompt_file=prompts/q$n.txt 2>&1; echo EXIT=\$?" 2>&1)
         printf '%s n=%s exit=%s | prompt_tokens=%s | %s | response=%s\n' "$b" "$n" \
           "$(grep -o 'EXIT=[0-9]*' <<< "$out" | tail -1 | cut -d= -f2)" \
           "$(awk '/\[Input Prompt Tokens\]/{getline; print}' <<< "$out" | tr -cs '0-9' '\n' | grep -c .)" \

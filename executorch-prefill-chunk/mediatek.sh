@@ -5,9 +5,8 @@
 # This builds that path for the Dimensity 9400 (MT6991, platform DX4), as upstream CI and examples/mediatek/README.md
 # do, to show on a phone that prompts at and above the batch size are prefilled in batches.
 #
-#   qwen2_5_0_5b_A16W4_128t512c.pte      examples/mediatek export of Qwen2.5-0.5B-Instruct, prompt model: 128 tokens per
-#                                        call, cache 512, A16W4, DX4, 1 chunk
-#   qwen2_5_0_5b_A16W4_1t512c.pte        the gen model (1 token per call), exported separately (no weight sharing)
+#   qwen2_5_0_5b_A16W4_128t512c_1t512c.pte  examples/mediatek export of Qwen2.5-0.5B-Instruct: prompt method (128 tokens
+#                                        per call) and gen method (1), cache 512, A16W4, DX4, 1 chunk, no weight sharing
 #   embedding_*_fp32.bin, tokenizer.json
 #   bin/mtk_llama_executor_runner, bin/mtk_llama_executor_runner_fixed   main without and with fix.patch
 #   lib/libneuron_backend.so (main), lib/libneuronusdk_adapter.mtk.so, lib/libneuron_buffer_allocator.so
@@ -64,22 +63,18 @@ git checkout -- "$W/config.json"
 ls -la "$W"
 echo "::endgroup::"
 
-echo "::group::export: examples/mediatek qwen, 1 chunk, A16W4, DX4, prompt 128t512c and gen 1t512c as separate models"
-# Weight sharing between the prompt and gen models (ExtractSharedBlobKey, #13941) needs mtk_neuron.extract_shared_data,
-# which the public NeuroPilot Express SDK that upstream CI installs (mtk_neuron 8.2.19) does not have. The runner also
-# takes separate prompt and gen models (--prompt_model_paths / --gen_model_paths), so drop the key and export each
-# shape on its own.
+echo "::group::export: examples/mediatek qwen, 1 chunk, 128t512c + 1t512c, A16W4, DX4, without weight sharing"
+# Weight sharing between the prompt and gen methods (ExtractSharedBlobKey, #13941) needs mtk_neuron.extract_shared_data,
+# which the public NeuroPilot Express SDK that upstream CI installs (mtk_neuron 8.2.19) does not have. Without the key,
+# each method keeps its own weights (NeuronBackend only shares weights when the key is in its compile specs); the
+# shapes are still exported together, as export_qwen.sh does (exporting 1t512c alone specializes the token dim).
 Q=examples/mediatek/model_export_scripts/qwen.py
 grep -q 'CompileSpec("ExtractSharedBlobKey"' "$Q"
 sed -i '/CompileSpec("ExtractSharedBlobKey"/d' "$Q"
 if grep -q 'ExtractSharedBlobKey' "$Q"; then echo "ExtractSharedBlobKey still in $Q"; exit 1; fi
-for shape in 128t512c 1t512c; do
-  rm -rf examples/mediatek/pte
-  (cd examples/mediatek && python3 model_export_scripts/qwen.py "models/llm_models/weights/$MODEL/config.json" \
-    -p A16W4 --num_chunks 1 --preformatter aot_utils/llm_utils/preformatter_templates/qwen.json \
-    -shapes "$shape" --platform DX4) > "$WORK/export_$shape.log" 2>&1 || { tail -60 "$WORK/export_$shape.log"; exit 1; }
-  cp "$(find examples/mediatek/pte -name '*.pte' | head -1)" "$OUT/qwen2_5_0_5b_A16W4_$shape.pte"
-done
+(cd examples/mediatek && bash shell_scripts/export_qwen.sh "$MODEL" 1 128 512 None A16W4 DX4) > "$WORK/export.log" 2>&1 \
+  || { tail -60 "$WORK/export.log"; exit 1; }
+cp "$(find examples/mediatek/pte -name '*.pte' | head -1)" "$OUT/qwen2_5_0_5b_A16W4_128t512c_1t512c.pte"
 cp "$W"/embedding_*_fp32.bin "$W/tokenizer.json" "$OUT/"
 ls -la "$OUT"/*.pte "$OUT"/embedding_*_fp32.bin
 echo "::endgroup::"

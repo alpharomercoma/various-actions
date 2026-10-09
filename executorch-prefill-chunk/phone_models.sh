@@ -5,6 +5,7 @@
 #   phone_models.sh <python with executorch> <executorch source checkout of that version> <out dir>
 #
 #   <model>_S128_C512_xnnpack.pte        XNNPACK, fp32, KV cache, dynamic shape (the CI cell)
+#   <model>_S128_C512_xnnpack_8da4w.pte  XNNPACK, 8da4w group 32 (smaller, for slow links)
 #   <model>_S128_C512_vulkan_8da4w.pte   Vulkan, 8da4w group 64, force_fp16 (the Vulkan llama tutorial's recipe)
 #   <model>.tokenizer.json               the model's Hugging Face tokenizer
 #   prompts_<model>/p<N>.txt             prompts of exactly N tokens with that tokenizer (C++ HFTokenizer, no BOS)
@@ -40,6 +41,11 @@ for m in qwen3_0_6b lfm2_350m; do
   (cd "$OUT" && "$PY" -m executorch.extension.llm.export.export_llm "${common[@]}" backend.xnnpack.enabled=True \
     export.output_name="$OUT/${m}_S128_C512_xnnpack.pte") > "$OUT/export_${m}_xnnpack.log" 2>&1 \
     || { tail -30 "$OUT/export_${m}_xnnpack.log"; exit 1; }
+  echo "== export $m XNNPACK 8da4w (group 32, as run.sh)"
+  (cd "$OUT" && "$PY" -m executorch.extension.llm.export.export_llm "${common[@]}" backend.xnnpack.enabled=True \
+    quantization.qmode=8da4w quantization.group_size=32 \
+    export.output_name="$OUT/${m}_S128_C512_xnnpack_8da4w.pte") > "$OUT/export_${m}_xnnpack_8da4w.log" 2>&1 \
+    || { tail -30 "$OUT/export_${m}_xnnpack_8da4w.log"; exit 1; }
   echo "== export $m Vulkan 8da4w fp16"
   (cd "$OUT" && "$PY" -m executorch.extension.llm.export.export_llm "${common[@]}" backend.vulkan.enabled=True \
     backend.vulkan.force_fp16=True quantization.qmode=8da4w quantization.group_size=64 \
