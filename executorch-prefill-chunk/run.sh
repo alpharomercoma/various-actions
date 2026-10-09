@@ -42,6 +42,9 @@ venv_for() {  # venv_for <version> -> prints the venv's python, installing it on
       *) echo "unknown version $v" >&2; exit 2 ;;
     esac
     "${pip[@]}" transformers safetensors huggingface_hub sentencepiece tiktoken >&2
+    # Before 1.2 the qwen3 and lfm2 checkpoint converters import torchtune.
+    # torchtune's own pins conflict with these torch releases; its converters need only omegaconf and datasets.
+    case $v in 1.0.1|1.1.0) "${pip[@]}" --no-deps torchtune==0.6.1 >&2; "${pip[@]}" omegaconf datasets >&2 ;; esac
     "$dir/bin/python" -c "import torch, executorch.version as v; print('executorch', v.__version__, v.git_version[:12], '| torch', torch.__version__)" >&2
     echo "::endgroup::" >&2
   fi

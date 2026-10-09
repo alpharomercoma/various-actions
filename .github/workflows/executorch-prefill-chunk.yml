@@ -34,6 +34,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Some wheels (1.2.0) do not bundle flatc, which the XNNPACK serializer runs.
+      - name: flatc
+        run: if [ "$RUNNER_OS" = macOS ]; then brew install flatbuffers; else sudo apt-get install -y -q flatbuffers-compiler; fi; flatc --version
       - run: executorch-prefill-chunk/run.sh repro ${{ matrix.version }} ${{ matrix.model }} 128 512 fp32
       - name: summary
         if: always()
@@ -77,6 +80,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Some wheels (1.2.0) do not bundle flatc, which the XNNPACK serializer runs.
+      - name: flatc
+        run: if [ "$RUNNER_OS" = macOS ]; then brew install flatbuffers; else sudo apt-get install -y -q flatbuffers-compiler; fi; flatc --version
       - run: executorch-prefill-chunk/run.sh repro ${{ matrix.version }} ${{ matrix.model }} ${{ matrix.s }} ${{ matrix.c }} ${{ matrix.quant }}
       - name: summary
         if: always()
@@ -108,6 +114,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Some wheels (1.2.0) do not bundle flatc, which the XNNPACK serializer runs.
+      - name: flatc
+        run: if [ "$RUNNER_OS" = macOS ]; then brew install flatbuffers; else sudo apt-get install -y -q flatbuffers-compiler; fi; flatc --version
       - run: executorch-prefill-chunk/run.sh cross ${{ matrix.export }} ${{ matrix.run }} ${{ matrix.model }} 128 512 fp32
       - name: summary
         if: always()
@@ -136,6 +145,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Some wheels (1.2.0) do not bundle flatc, which the XNNPACK serializer runs.
+      - name: flatc
+        run: if [ "$RUNNER_OS" = macOS ]; then brew install flatbuffers; else sudo apt-get install -y -q flatbuffers-compiler; fi; flatc --version
       - name: build main + fix.patch, export and check
         run: |
           executorch-prefill-chunk/run.sh fix stories110m 128 512 fp32
