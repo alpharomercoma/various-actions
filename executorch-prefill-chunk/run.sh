@@ -4,7 +4,10 @@
 #   run.sh repro <version> <model> <S> <C> <quant>      install <version>, export, check
 #   run.sh cross <export_version> <run_version> <model> <S> <C> <quant>
 #                                                     export with one release, check with another
-#   run.sh fix <model> <S> <C> <quant>                  build main + fix.patch from source, export, check
+#   run.sh fix <model> <S> <C> <quant>                  build main + fix.patch from source, then check
+#                                                     (a) a file exported by the 1.5.1 release (bound S - 1) on the
+#                                                         patched runtime: the runner fix alone
+#                                                     (b) a file exported by the patched export_llm: the exporter fix
 #   run.sh unit                                         build main + fix.patch, then the runner's C++ test_runner
 #
 # version: 1.0.1 | 1.1.0 | 1.2.0 | 1.3.1 | 1.4.1 | 1.5.1 | nightly | source (fix mode only)
@@ -157,9 +160,17 @@ case $MODE in
   fix)
     M=$1 S=$2 C=$3 Q=$4
     build_source
-    PTE="$WORK/${M}_S${S}_C${C}_${Q}_etsource.pte"
+    TAG=${M}_S${S}_C${C}_${Q}; [ "$BACKEND" = xnnpack ] || TAG=${TAG}_$BACKEND
+    # (a) the runner fix alone: a file from the unpatched 1.5.1 exporter, run by the patched runtime.
+    RPY=$(venv_for 1.5.1)
+    PTE="$WORK/${TAG}_et1.5.1.pte"
+    [ -f "$PTE" ] || export_pte "$RPY" 1.5.1 "$M" "$S" "$C" "$Q" "$PTE"
+    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_fix_runner_${TAG}.json"
+    # (b) the exporter fix: a file from the patched export_llm.
+    PTE="$WORK/${TAG}_etsource.pte"
     export_pte "$PY" source "$M" "$S" "$C" "$Q" "$PTE"
-    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_fix_${M}_S${S}_C${C}_${Q}.json" ;;
+    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_fix_export_${TAG}.json"
+    rm -f "$WORK/${TAG}_et1.5.1.pte" "$PTE" ;;
   unit)
     build_source
     echo "::group::cmake: extension/llm/runner tests (test_runner)"
@@ -180,6 +191,10 @@ case $MODE in
     T="$B/extension/llm/runner/test"
     ET_PREFILL_CHUNK_BOUNDED_PATH="$T/PrefillChunk_bounded.pte" ET_PREFILL_CHUNK_FULL_PATH="$T/PrefillChunk_full.pte" \
       "$T/test_runner" --gtest_filter='PrefillChunkSizeTest.*' | tee -a "$WORK/ctest.log"
-    grep -E "^\[ +(OK|FAILED|PASSED) +\]|tests passed|tests failed" "$WORK/ctest.log" | tee -a "$WORK/summary.txt" ;;
+    grep -E "^\[ +(OK|FAILED|PASSED) +\]|tests passed|tests failed" "$WORK/ctest.log" | tee -a "$WORK/summary.txt"
+    # The exporter half: builder.py's dynamic-shape tests.
+    "$PY" -m pip install -q pytest
+    (cd "$WORK/src/executorch" && "$PY" -m pytest -q extension/llm/export/test/test_builder.py -k dynamic_shape) \
+      | tee -a "$WORK/ctest.log" | tail -3 | tee -a "$WORK/summary.txt" ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
 esac

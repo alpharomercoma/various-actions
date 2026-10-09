@@ -6,11 +6,6 @@ name: executorch-prefill-chunk-android
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - executorch-prefill-chunk/android.sh
-      - executorch-prefill-chunk/fix.patch
-      - .github/workflows/executorch-prefill-chunk-android.yml
 
 defaults:
   run:

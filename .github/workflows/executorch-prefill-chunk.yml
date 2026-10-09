@@ -7,10 +7,10 @@ name: executorch-prefill-chunk
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - executorch-prefill-chunk/**
-      - .github/workflows/executorch-prefill-chunk.yml
+    inputs:
+      groups:
+        description: "Job groups to run: all, or any of releases variants mlx cross fix"
+        default: all
 
 defaults:
   run:
@@ -21,6 +21,7 @@ env:
 
 jobs:
   releases:
+    if: inputs.groups == 'all' || contains(inputs.groups, 'releases')
     name: release ${{ matrix.version }} ${{ matrix.model }}
     strategy:
       fail-fast: false
@@ -54,6 +55,7 @@ jobs:
           if-no-files-found: warn
 
   variants:
+    if: inputs.groups == 'all' || contains(inputs.groups, 'variants')
     name: variant ${{ matrix.os }} ${{ matrix.version }} ${{ matrix.model }} S${{ matrix.s }} C${{ matrix.c }} ${{ matrix.quant }}
     strategy:
       fail-fast: false
@@ -99,7 +101,41 @@ jobs:
             ${{ runner.temp }}/prefill-chunk/summary.txt
           if-no-files-found: warn
 
+  mlx:
+    if: inputs.groups == 'all' || contains(inputs.groups, 'mlx')
+    name: mlx ${{ matrix.version }} ${{ matrix.model }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["1.5.1", nightly]
+        model: [stories110m, qwen3_0_6b]
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      BACKEND: mlx
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: executorch-prefill-chunk/run.sh repro ${{ matrix.version }} ${{ matrix.model }} 128 512 fp32
+      - name: summary
+        if: always()
+        run: |
+          { echo "### mlx ${{ matrix.version }} ${{ matrix.model }}"; echo '```'; cat "$RUNNER_TEMP/prefill-chunk/summary.txt" 2>/dev/null || echo "no summary"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mlx-${{ matrix.version }}-${{ matrix.model }}
+          path: |
+            ${{ runner.temp }}/prefill-chunk/result_*.json
+            ${{ runner.temp }}/prefill-chunk/result_*.log
+            ${{ runner.temp }}/prefill-chunk/*.export.log
+            ${{ runner.temp }}/prefill-chunk/summary.txt
+          if-no-files-found: warn
+
   cross:
+    if: inputs.groups == 'all' || contains(inputs.groups, 'cross')
     name: cross export ${{ matrix.export }} run ${{ matrix.run }} ${{ matrix.model }}
     strategy:
       fail-fast: false
@@ -133,6 +169,7 @@ jobs:
           if-no-files-found: warn
 
   fix:
+    if: inputs.groups == 'all' || contains(inputs.groups, 'fix')
     name: fix ${{ matrix.os }}
     strategy:
       fail-fast: false
