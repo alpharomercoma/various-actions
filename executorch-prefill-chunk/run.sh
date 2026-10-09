@@ -127,11 +127,11 @@ build_source() {  # main + fix.patch, installed into venv-source (python binding
   if [ ! -x "$PY" ]; then
     echo "::group::build executorch $MAIN_COMMIT + fix.patch from source"
     "$PY_BASE" -m venv "$WORK/venv-source"
-    git clone -q https://github.com/pytorch/executorch.git "$WORK/et-main"
-    git -C "$WORK/et-main" checkout -q "$MAIN_COMMIT"
-    git -C "$WORK/et-main" apply "$HERE/fix.patch"
-    git -C "$WORK/et-main" submodule update --init --recursive -q
-    (cd "$WORK/et-main" && "$PY" -m pip install -q --upgrade pip && PYTHON_EXECUTABLE="$PY" ./install_executorch.sh) \
+    git clone -q https://github.com/pytorch/executorch.git "$WORK/src/executorch"
+    git -C "$WORK/src/executorch" checkout -q "$MAIN_COMMIT"
+    git -C "$WORK/src/executorch" apply "$HERE/fix.patch"
+    git -C "$WORK/src/executorch" submodule update --init --recursive -q
+    (cd "$WORK/src/executorch" && "$PY" -m pip install -q --upgrade pip && PYTHON_EXECUTABLE="$PY" ./install_executorch.sh) \
       > "$WORK/build.log" 2>&1 || { tail -60 "$WORK/build.log"; exit 1; }
     "$PY" -m pip install -q transformers safetensors huggingface_hub sentencepiece tiktoken
     "$PY" -c "import executorch.version as v; print('built executorch', v.__version__, v.git_version[:12])"
@@ -164,7 +164,7 @@ case $MODE in
     build_source
     echo "::group::cmake: extension/llm/runner tests (test_runner)"
     B="$WORK/cmake-tests"
-    (cd "$WORK/et-main" && cmake . -B "$B" -DCMAKE_BUILD_TYPE=Release -DPYTHON_EXECUTABLE="$PY" \
+    (cd "$WORK/src/executorch" && cmake . -B "$B" -DCMAKE_BUILD_TYPE=Release -DPYTHON_EXECUTABLE="$PY" \
       -DEXECUTORCH_BUILD_TESTS=ON -DEXECUTORCH_BUILD_KERNELS_LLM=ON -DEXECUTORCH_BUILD_KERNELS_OPTIMIZED=ON \
       -DEXECUTORCH_BUILD_KERNELS_QUANTIZED=ON -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
       -DEXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR=ON -DEXECUTORCH_BUILD_EXTENSION_IMAGE=ON \

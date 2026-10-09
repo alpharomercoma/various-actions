@@ -18,7 +18,7 @@ OUT=$WORK/out
 MAIN_COMMIT=${MAIN_COMMIT:-9875560827}
 JOBS=$(nproc)
 mkdir -p "$WORK" "$OUT/bin" "$OUT/qnn"
-ET=$WORK/et-main
+ET=$WORK/src/executorch
 export ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT:-${ANDROID_NDK_LATEST_HOME:?no Android NDK on this runner}}
 
 echo "::group::checkout executorch $MAIN_COMMIT"

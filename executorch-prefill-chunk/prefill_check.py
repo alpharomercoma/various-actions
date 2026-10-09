@@ -30,20 +30,36 @@ import tempfile
 
 @contextlib.contextmanager
 def captured_stderr():
-    """Capture what the C++ runtime writes to fd 2 during a call (ET_LOG goes there)."""
-    buf = {"text": ""}
+    """Capture what the C++ runtime writes to fd 2 (ET_LOG) and fd 1 (the runner's PyTorchObserver stats) during a
+    call. `text` is fd 2, `stdout` is fd 1."""
+    buf = {"text": "", "stdout": ""}
+    sys.stdout.flush()
     sys.stderr.flush()
-    saved = os.dup(2)
-    with tempfile.TemporaryFile(mode="w+b") as tmp:
-        os.dup2(tmp.fileno(), 2)
+    saved = {fd: os.dup(fd) for fd in (1, 2)}
+    with tempfile.TemporaryFile(mode="w+b") as out, tempfile.TemporaryFile(mode="w+b") as err:
+        os.dup2(out.fileno(), 1)
+        os.dup2(err.fileno(), 2)
         try:
             yield buf
         finally:
+            sys.stdout.flush()
             sys.stderr.flush()
-            os.dup2(saved, 2)
-            os.close(saved)
-            tmp.seek(0)
-            buf["text"] = tmp.read().decode("utf-8", "replace")
+            for fd, keep in saved.items():
+                os.dup2(keep, fd)
+                os.close(keep)
+            err.seek(0)
+            out.seek(0)
+            buf["text"] = err.read().decode("utf-8", "replace")
+            buf["stdout"] = out.read().decode("utf-8", "replace")
+
+
+def observed_prompt_tokens(text: str) -> int | None:
+    """prompt_tokens from the runner's PyTorchObserver line: the count the runner itself encoded."""
+    for line in text.splitlines():
+        if "PyTorchObserver" in line:
+            with contextlib.suppress(Exception):
+                return int(json.loads(line.split("PyTorchObserver", 1)[1])["prompt_tokens"])
+    return None
 
 
 def error_lines(text: str) -> list[str]:
@@ -123,27 +139,69 @@ def chunked_prefill(path: str, tokens: list[int], chunk: int) -> tuple[bool, int
 
 
 class Prompts:
-    """Prompts whose token count, as the runner's own tokenizer encodes them, is exactly a target."""
+    """Prompts whose token count, as the runner's own C++ tokenizer encodes them, is exactly a target.
+
+    The Python HuggingFaceTokenizer adds the template's BOS even with bos=0, the C++ HFTokenizer the runner loads does
+    not, so counting with the Python one is off by one for LFM2. Load the C++ classes in the order
+    llm_runner_helper.cpp's load_tokenizer tries them (HF json, then SentencePiece, then llama2c), and fall back to
+    the Python tokenizer only where the C++ bindings are absent (recorded in `impl`).
+    """
 
     def __init__(self, tokenizer_path: str):
-        from pytorch_tokenizers import get_tokenizer
+        self.impl, self.tok = None, None
+        with contextlib.suppress(Exception):
+            import pytorch_tokenizers as pt
 
-        self.tok = get_tokenizer(tokenizer_path)
+            for name in ("CppHFTokenizer", "CppSPTokenizer", "CppLlama2cTokenizer"):
+                cls = getattr(pt, name, None)
+                if cls is None:
+                    continue
+                tok = cls()
+                with contextlib.suppress(Exception):
+                    if str(tok.load(tokenizer_path)).endswith("Ok") or tok.vocab_size() > 0:
+                        self.impl, self.tok = name, tok
+                        break
+        if self.tok is None:
+            from pytorch_tokenizers import get_tokenizer
+
+            self.impl, self.tok = (
+                "python " + type(get_tokenizer(tokenizer_path)).__name__,
+                get_tokenizer(tokenizer_path),
+            )
+
+    def tokens(self, text: str) -> list[int]:
+        if self.impl.startswith("Cpp"):
+            return list(self.tok.encode(text, 0, 0))
+        return list(self.tok.encode(text, bos=0, eos=0))
 
     def count(self, text: str) -> int:
-        return len(self.tok.encode(text, bos=0, eos=0))
+        return len(self.tokens(text))
 
-    def exactly(self, n: int) -> str:
+    def exactly(self, n: int, lead: str = "") -> str:
         words = ["apple"] * max(1, n)
-        text = " ".join(words)
+        text = lead + " ".join(words)
         # Most tokenizers give one token per " apple"; walk to the exact count either way.
         for _ in range(4 * n + 50):
             c = self.count(text)
             if c == n:
                 return text
             words = words[:-1] if c > n else words + ["apple"]
-            text = " ".join(words)
+            text = lead + " ".join(words)
         raise RuntimeError(f"could not build a prompt of exactly {n} tokens")
+
+    def split(self, n: int, bound: int) -> tuple[str, list[str]] | None:
+        """A prompt of n tokens and pieces of at most `bound` tokens whose separate encodings concatenate to exactly the
+        whole prompt's tokens (so prefill() of the pieces and generate() of the whole see the same token sequence)."""
+        sizes, left = [], n
+        while left > 0:
+            sizes.append(min(bound, left))
+            left -= sizes[-1]
+        for lead in ("", " "):
+            pieces = [self.exactly(sizes[0])] + [self.exactly(k, lead) for k in sizes[1:]]
+            whole = (" " if lead == "" else "").join(pieces)
+            if self.tokens(whole) == [t for p in pieces for t in self.tokens(p)]:
+                return whole, pieces
+        return None
 
 
 def runner_cases(path: str, tok_path: str, facts: dict) -> dict | None:
@@ -162,12 +220,15 @@ def runner_cases(path: str, tok_path: str, facts: dict) -> dict | None:
         return cfg
 
     targets = [s - 1, s, s + 1]
+    long_split = None
     if 2 * s + 1 + 8 < ctx:
         targets.append(2 * s + 1)
+        if bound:
+            long_split = prompts.split(2 * s + 1, bound)
     cases = []
     for n in targets:
         runner = TextLLMRunner(path, tok_path)
-        text = prompts.exactly(n)
+        text = long_split[0] if (long_split and n == 2 * s + 1) else prompts.exactly(n)
         pieces = []
         with captured_stderr() as err:
             try:
@@ -175,25 +236,29 @@ def runner_cases(path: str, tok_path: str, facts: dict) -> dict | None:
                 ok = True
             except Exception as e:  # noqa: BLE001
                 ok, exc = False, f"{type(e).__name__}: {e}"
-        row = {"n": n, "ok": ok, "pieces": len(pieces), "text": "".join(pieces), "stderr": error_lines(err["text"])}
+        row = {
+            "n": n,
+            "ok": ok,
+            "runner_prompt_tokens": observed_prompt_tokens(err["stdout"] + err["text"]),
+            "pieces": len(pieces),
+            "text": "".join(pieces),
+            "stderr": error_lines(err["text"]),
+        }
         if not ok:
             row["exception"] = exc[:200]
         cases.append(row)
 
     workaround = None
-    if bound and 2 * s + 1 + 8 < ctx and hasattr(TextLLMRunner, "prefill"):
+    if long_split and hasattr(TextLLMRunner, "prefill"):
         # Same 2S + 1 prompt, sent in pieces of at most `bound` tokens, then generation from the prefilled state.
         n = 2 * s + 1
         runner = TextLLMRunner(path, tok_path)
-        sizes, left = [], n
-        while left > 0:
-            sizes.append(min(bound, left))
-            left -= sizes[-1]
+        sizes = [prompts.count(p) for p in long_split[1]]
         out = []
         with captured_stderr() as err:
             try:
-                for size in sizes:
-                    runner.prefill(prompts.exactly(size), config())
+                for piece in long_split[1]:
+                    runner.prefill(piece, config())
                 runner.generate("", config(), out.append)
                 ok = True
             except Exception as e:  # noqa: BLE001
@@ -214,7 +279,14 @@ def runner_cases(path: str, tok_path: str, facts: dict) -> dict | None:
         # With a runner that chunks at the real bound, generate(2S + 1 tokens) and the bound-sized prefill pieces see
         # the same chunks, so their greedy continuations must match.
         same = long_case["text"] == workaround["text"]
-    return {"available": True, "cases": cases, "workaround": workaround, "long_matches_workaround": same}
+    return {
+        "available": True,
+        "tokenizer": prompts.impl,
+        "cases": cases,
+        "workaround": workaround,
+        "long_matches_workaround": same,
+        "long_prompt_splits_exactly": long_split is not None,
+    }
 
 
 def main() -> int:
@@ -234,7 +306,8 @@ def main() -> int:
         et_version = f"{etv.__version__} ({etv.git_version[:12]})"
     except Exception:  # noqa: BLE001
         et_version = getattr(executorch, "__version__", "unknown")
-    data = open(args.pte, "rb").read()
+    with open(args.pte, "rb") as f:
+        data = f.read()
     facts = program_facts(args.pte)
     s, bound, ctx = facts["max_seq_len"], facts["bound"], facts["max_context_len"]
     result = {
@@ -274,12 +347,25 @@ def main() -> int:
         f"file {result['file']} sha256 {result['sha256'][:16]}",
         f"advertised get_max_seq_len={s} get_max_context_len={ctx} | forward input0 {facts['input0_sizes']} (bound {bound})",
         "module " + " ".join(f"{r['n']}:{'ok' if r['ok'] else 'FAIL'}" for r in result["module"]),
-        f"chunked n={n_long} at_bound({bound}):{'ok' if ok_a else 'FAIL'} at_half({half}):{'ok' if ok_b else 'FAIL'} "
-        f"same_next_token={result['chunked']['same_next_token']}",
+        (
+            f"chunked n={n_long} at_bound({bound}):{'ok' if ok_a else 'FAIL'} at_half({half}):{'ok' if ok_b else 'FAIL'} "
+            f"same_next_token={result['chunked']['same_next_token']}"
+        ),
     ]
     r = result["runner"]
     if r and r.get("available"):
-        lines.append("runner " + " ".join(f"{c['n']}:{'ok' if c['ok'] else 'FAIL'}" for c in r["cases"]))
+        lines.append(
+            f"runner ({r.get('tokenizer')}) "
+            + " ".join(
+                f"{c['n']}:{'ok' if c['ok'] else 'FAIL'}"
+                + (
+                    f"[runner saw {c['runner_prompt_tokens']}]"
+                    if c.get("runner_prompt_tokens") not in (None, c["n"])
+                    else ""
+                )
+                for c in r["cases"]
+            )
+        )
         if r.get("workaround"):
             w = r["workaround"]
             lines.append(
