@@ -1,0 +1,45 @@
+name: executorch-prefill-chunk-android
+
+# Build the Android binaries and model files for the on-device runs of executorch-prefill-chunk: llama_main (XNNPACK)
+# from main with and without fix.patch, the Qualcomm qnn_llama_runner with a QNN export for SM8850 as the control, and
+# a stock export_llm XNNPACK export. The runs themselves happen on phones with executorch-prefill-chunk/device.sh.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - executorch-prefill-chunk/android.sh
+      - executorch-prefill-chunk/fix.patch
+      - .github/workflows/executorch-prefill-chunk-android.yml
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: executorch-prefill-chunk/android.sh
+      - name: logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/prefill-android/out/logs"
+          cp "$RUNNER_TEMP"/prefill-android/*.log "$RUNNER_TEMP/prefill-android/out/logs/" 2>/dev/null || true
+          { echo '### MANIFEST'; echo '```'; cat "$RUNNER_TEMP/prefill-android/out/MANIFEST.txt" 2>/dev/null; echo '```';
+            echo '### host check of the XNNPACK export'; echo '```'; cat "$RUNNER_TEMP/prefill-android/out/host_check_xnnpack.txt" 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prefill-android
+          path: ${{ runner.temp }}/prefill-android/out
+          if-no-files-found: warn

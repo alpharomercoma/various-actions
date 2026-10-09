@@ -11,11 +11,13 @@
 # model:   stories110m (Llama) | qwen3_0_6b | lfm2_350m (hybrid conv/attention)
 # S, C:    export.max_seq_length (prefill chunk) and export.max_context_length (KV cache)
 # quant:   fp32 (none) | 8da4w (quantization.qmode=8da4w, group size 32)
+# BACKEND=xnnpack (default) | mlx (Apple Silicon; export_llm's MLX path, which goes through the same builder)
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${RUNNER_TEMP:-/tmp}/prefill-chunk
 mkdir -p "$WORK"
 PY_BASE=${PYTHON:-python3}
+BACKEND=${BACKEND:-xnnpack}
 NIGHTLY_ET=1.6.0.dev20261008
 NIGHTLY_TORCH=2.16.0.dev20261008
 # main at the nightly above; the fix is applied on top of it in fix mode.
@@ -77,9 +79,13 @@ tokenizer_for() {  # tokenizer_for <python> <model>
 export_pte() {  # export_pte <python> <version> <model> <S> <C> <quant> <out.pte>
   local py=$1 v=$2 m=$3 s=$4 c=$5 q=$6 out=$7 src args
   src=$(sources_for "$v")
-  args=(base.model_class="$m" model.use_kv_cache=True model.use_sdpa_with_kv_cache=True model.enable_dynamic_shape=True
-        export.max_seq_length="$s" export.max_context_length="$c" backend.xnnpack.enabled=True
-        export.output_name="$out")
+  args=(base.model_class="$m" model.use_kv_cache=True model.enable_dynamic_shape=True
+        export.max_seq_length="$s" export.max_context_length="$c" export.output_name="$out")
+  case $BACKEND in
+    xnnpack) args+=(model.use_sdpa_with_kv_cache=True backend.xnnpack.enabled=True) ;;
+    mlx) args+=(backend.mlx.enabled=True) ;;
+    *) echo "unknown backend $BACKEND"; exit 2 ;;
+  esac
   case $m in
     stories110m)
       [ -f "$WORK/stories110M.pt" ] || curl -sSfL -o "$WORK/stories110M.pt" \
@@ -95,7 +101,7 @@ export_pte() {  # export_pte <python> <version> <model> <S> <C> <quant> <out.pte
     8da4w) args+=(quantization.qmode=8da4w quantization.group_size=32) ;;
     *) echo "unknown quant $q"; exit 2 ;;
   esac
-  echo "::group::export $m S=$s C=$c $q with executorch $v"
+  echo "::group::export $m S=$s C=$c $q $BACKEND with executorch $v"
   local log="${out%.pte}.export.log"
   (cd "$WORK" && "$py" -m executorch.extension.llm.export.export_llm "${args[@]}") > "$log" 2>&1 \
     || { tail -40 "$log"; exit 1; }
@@ -138,9 +144,10 @@ case $MODE in
   repro)
     V=$1 M=$2 S=$3 C=$4 Q=$5
     PY=$(venv_for "$V")
-    PTE="$WORK/${M}_S${S}_C${C}_${Q}_et${V}.pte"
+    TAG=${M}_S${S}_C${C}_${Q}; [ "$BACKEND" = xnnpack ] || TAG=${TAG}_$BACKEND
+    PTE="$WORK/${TAG}_et${V}.pte"
     export_pte "$PY" "$V" "$M" "$S" "$C" "$Q" "$PTE"
-    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_repro_${V}_${M}_S${S}_C${C}_${Q}.json" ;;
+    check "$PY" "$PTE" "$(tokenizer_for "$PY" "$M")" "$WORK/result_repro_${V}_${TAG}.json" ;;
   cross)
     EV=$1 RV=$2 M=$3 S=$4 C=$5 Q=$6
     EPY=$(venv_for "$EV"); RPY=$(venv_for "$RV")
