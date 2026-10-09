@@ -322,6 +322,10 @@ def violations_if_fixed(result: dict, expected_bound: int | None = None) -> list
     out = []
     if expected_bound is not None and bound != expected_bound:
         out.append(f"token bound {bound}, expected {expected_bound}")
+    # The recorder must have produced every case this configuration calls for.
+    want_module = {n for n in (bound, bound + 1, s - 1, s, s + 1) if n > 0}
+    if {m["n"] for m in result.get("module", [])} != want_module:
+        out.append(f"forward() cases {sorted(m['n'] for m in result.get('module', []))}, expected {sorted(want_module)}")
     # forward() accepts exactly the prompts up to the file's bound.
     for m in result.get("module", []):
         if m["ok"] != (m["n"] <= bound):
@@ -331,6 +335,9 @@ def violations_if_fixed(result: dict, expected_bound: int | None = None) -> list
         out.append("forward() chunked at the bound and at half of it did not both succeed with the same next token")
     if not r.get("available"):
         return out + ["TextLLMRunner unavailable"]
+    want_runner = {s - 1, s, s + 1} | ({2 * s + 1} if 2 * s + 1 + 8 < ctx else set())
+    if {c["n"] for c in r["cases"]} != want_runner:
+        out.append(f"generate() cases {sorted(c['n'] for c in r['cases'])}, expected {sorted(want_runner)}")
     for c in r["cases"]:
         if any("resize" in line for line in c["stderr"]):
             out.append(f"generate({c['n']}): resize error {c['stderr'][:1]}")
@@ -344,6 +351,8 @@ def violations_if_fixed(result: dict, expected_bound: int | None = None) -> list
     p = r.get("prefill_s")
     if p is None:
         out.append("no prefill() of S tokens")
+    elif p["n"] != s:
+        out.append(f"prefill() of {p['n']} tokens, expected {s}")
     elif not p["ok"]:
         out.append(f"prefill({p['n']}) failed: {p['stderr'][:2]}")
     w = r.get("workaround")
