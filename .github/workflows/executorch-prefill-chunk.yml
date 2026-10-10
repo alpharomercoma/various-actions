@@ -11,6 +11,9 @@ on:
       groups:
         description: "Job groups to run: all, or any of releases variants mlx cross fix"
         default: all
+      main_commit:
+        description: "pytorch/executorch commit for the source builds (fix, unit, nightly-from-source)"
+        default: "9875560827"
 
 defaults:
   run:
@@ -18,6 +21,7 @@ defaults:
 
 env:
   PYTHONUTF8: "1"
+  MAIN_COMMIT: ${{ inputs.main_commit || '9875560827' }}
 
 jobs:
   releases:
