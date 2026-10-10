@@ -1,11 +1,12 @@
 # executorch-prefill-chunk
 
 ExecuTorch's text runner prefills a prompt in chunks of `get_max_seq_len` tokens (`TextPrefiller`), but `export_llm`
-(`extension/llm/export/builder.py`) has bounded the token input of KV-cache, dynamic-shape exports at
-`max_seq_len - 1` since 1.1.0, while it publishes `get_max_seq_len = max_seq_len`. Every prompt of `max_seq_len`
-tokens or more then fails: `Attempted to resize a bounded tensor with a maximum capacity of 127 elements to 128
-elements` / `Error resizing tensor at input 0`. Through `generate()` this shows on exports with
-`max_seq_length < max_context_length`; through `prefill()` it also shows on default exports (S == C).
+(`extension/llm/export/builder.py`), with its default KV-cache dynamic shapes, has bounded the token input at
+`max_seq_len - 1` since 1.1.0, while it publishes `get_max_seq_len = max_seq_len`. With S = `max_seq_length` and
+C = `max_context_length`, `generate()` on a fresh runner then fails for prompts of S <= N < C tokens (longer prompts
+are refused by its context check first): `Attempted to resize a bounded tensor with a maximum capacity of 127
+elements to 128 elements` / `Error resizing tensor at input 0`. `prefill()` of S tokens skips that check, so it also
+fails on exports with S == C.
 
 `fix.patch` (against pytorch/executorch main `9875560`) has two parts: `builder.py` bounds the KV-cache token input at
 `max_seq_len` again, and `create_text_llm_runner` sizes the prefill chunks by the method's real token bound
@@ -18,16 +19,18 @@ elements` / `Error resizing tensor at input 0`. Through `generate()` this shows 
 - what it publishes (`get_max_seq_len`, `get_max_context_len`) and what `forward` accepts (input 0's upper bound);
 - `forward()` at input_pos 0 with S - 1, S and S + 1 tokens;
 - a long prompt prefilled through `forward()` in chunks of the bound and of half of it (same next token);
-- `TextLLMRunner.generate()` with prompts of exactly S - 1, S, S + 1 and 2S + 1 tokens (the binding exists from
-  1.2.0), counted with the runner's own C++ tokenizer and checked against its `PyTorchObserver` `prompt_tokens`;
+- `TextLLMRunner.generate()` with prompts of exactly S - 1, S, S + 1 tokens, and 2S + 1 when it fits in the context
+  (2S + 1 + 8 < C) (the binding exists from 1.2.0), counted with the runner's own C++ tokenizer; the
+  `PyTorchObserver` `prompt_tokens` of each call is recorded (and asserted with `--expect fixed`);
 - `TextLLMRunner.prefill()` of exactly S tokens (it skips `generate()`'s context check, so it also covers S == C);
-- the 2S + 1 prompt sent as `prefill()` pieces of at most the bound, then `generate("")`; the pieces are chosen so
-  that their tokens concatenate to exactly the whole prompt's tokens.
+- when 2S + 1 fits, that prompt sent as `prefill()` pieces of at most the bound, then `generate("")`; the pieces are
+  chosen so that their tokens concatenate to exactly the whole prompt's tokens.
 
 With `--expect fixed` it exits 1 if any of these fails where it should work. `--expect observe` (the default) only
 records.
 
-`run.sh` modes (stock `export_llm`, KV cache, dynamic shape; `BACKEND=xnnpack` (default) or `mlx`):
+`run.sh` modes (`export_llm` with KV cache and dynamic shape: the release's stock exporter, except the patched
+source's exporter for half (b) of `fix`; `BACKEND=xnnpack` (default) or `mlx`):
 
 - `repro <version> <model> <S> <C> <quant>`: install a release (1.0.1 to 1.5.1 with its torch, or `nightly`), export,
   check;

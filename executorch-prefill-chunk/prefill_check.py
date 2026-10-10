@@ -97,7 +97,7 @@ def program_facts(path: str) -> dict:
         return prog.load_method(name).execute([])[0]
 
     meta = prog.metadata("forward")
-    sizes = list(meta.input_tensor_meta(0).sizes())  # a dynamic dimension reports its upper bound
+    sizes = list(meta.input_tensor_meta(0).sizes())  # a bounded dynamic dimension reports its upper bound
     return {
         "max_seq_len": const("get_max_seq_len"),
         "max_context_len": const("get_max_context_len"),
