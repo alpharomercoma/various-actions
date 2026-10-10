@@ -356,7 +356,7 @@ def violations_if_fixed(result: dict, expected_bound: int | None = None) -> list
     elif not p["ok"]:
         out.append(f"prefill({p['n']}) failed: {p['stderr'][:2]}")
     w = r.get("workaround")
-    if s < ctx and w is None:
+    if 2 * s + 1 + 8 < ctx and w is None:  # recorded only when the long prompt fits, as above
         out.append("no piecewise comparison for the long prompt")
     if w is not None and not w["ok"]:
         out.append(f"piecewise prefill failed: {w['stderr'][:2]}")
